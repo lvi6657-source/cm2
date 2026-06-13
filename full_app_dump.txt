@@ -1,0 +1,2818 @@
+1:import React, {
+2:  useState,
+3:  useEffect,
+4:  useRef,
+5:  useMemo,
+6:  useCallback,
+7:  useLayoutEffect,
+8:} from "react";
+9:import { motion, AnimatePresence } from "motion/react";
+10:import {
+11:  Mic,
+12:  Plus,
+13:  Check,
+14:  ListPlus,
+15:  TextQuote,
+16:  Trash2,
+17:  Search,
+18:  ChevronLeft,
+19:  Layers,
+20:  Infinity,
+21:  Minus,
+22:  Copy,
+23:  CheckSquare,
+24:  Undo2,
+25:  Redo2,
+26:  Type,
+27:  Baseline,
+28:  AArrowUp,
+29:  Square,
+30:} from "lucide-react";
+31:import { useLongPress } from "./hooks/useLongPress";
+32:
+33:// DND Kit Imports
+34:import {
+35:  DndContext,
+36:  closestCenter,
+37:  KeyboardSensor,
+38:  PointerSensor,
+39:  TouchSensor,
+40:  useSensor,
+41:  useSensors,
+42:  DragEndEvent,
+43:  DragStartEvent,
+44:  DragMoveEvent,
+45:} from "@dnd-kit/core";
+46:import {
+47:  arrayMove,
+48:  SortableContext,
+49:  rectSortingStrategy,
+50:  verticalListSortingStrategy,
+51:  useSortable,
+52:} from "@dnd-kit/sortable";
+53:import { CSS } from "@dnd-kit/utilities";
+54:
+55:interface Card {
+56:  id: string;
+57:  text: string;
+58:  completed: boolean;
+59:  createdAt: number;
+60:  colorClass?: string;
+61:  parentId: string | null;
+62:  windowId?: string;
+63:  isDeleted?: boolean;
+64:  isPinned?: boolean;
+65:}
+66:
+67:const getRandomColor = () => {
+68:  const h = Math.floor(Math.random() * 360); // 0 to 359 (entire color wheel)
+69:  const s = Math.floor(Math.random() * 60) + 30; // 30% to 90% saturation
+70:  const l = Math.floor(Math.random() * 20) + 15; // 15% to 35% lightness for white text
+71:  return `hsl(${h}, ${s}%, ${l}%)`;
+72:};
+73:
+74:const darkenHsl = (hslStr: string, percentage: number) => {
+75:  if (!hslStr.startsWith("hsl")) return hslStr;
+76:  const match = hslStr.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
+77:  if (!match) return hslStr;
+78:  const h = parseInt(match[1]);
+79:  const s = parseInt(match[2]);
+80:  const l = Math.max(0, parseInt(match[3]) - percentage);
+81:  return `hsl(${h}, ${s}%, ${l}%)`;
+82:};
+83:
+84:type VoiceMode = "single" | "multiple" | "continuous";
+85:
+86:export default function App() {
+87:  const [viewportHeight, setViewportHeight] = useState("100dvh");
+88:  const [viewportOffset, setViewportOffset] = useState(0);
+89:
+90:  useEffect(() => {
+91:    if (!window.visualViewport) return;
+92:    
+93:    const updateViewport = () => {
+94:      setViewportHeight(`${window.visualViewport!.height}px`);
+95:      // When keyboard shows and the browser pans, visualViewport.offsetTop > 0
+96:      // We can use it to push our fixed header down or just negate the scroll inside our layout
+97:      setViewportOffset(window.visualViewport!.offsetTop);
+98:      // Wait, if Safari pans, the entire document body has window.scrollY or visualViewport.pageTop.
+99:      // Easiest is to force scroll to 0 if we are dynamically resizing.
+100:      window.scrollTo(0, 0);
+101:    };
+102:
+103:    window.visualViewport.addEventListener("resize", updateViewport);
+104:    window.visualViewport.addEventListener("scroll", updateViewport);
+105:    updateViewport();
+106:
+107:    return () => {
+108:      window.visualViewport!.removeEventListener("resize", updateViewport);
+109:      window.visualViewport!.removeEventListener("scroll", updateViewport);
+110:    };
+111:  }, []);
+112:
+113:  const [cards, setCards] = useState<Card[]>(() => {
+114:    const saved = localStorage.getItem("memoryCards");
+115:    if (saved) {
+116:      try {
+117:        const parsed = JSON.parse(saved).map((c: any) => ({
+118:          ...c,
+119:          parentId: c.parentId || null,
+120:          colorClass: c.colorClass || getRandomColor(),
+121:        }));
+122:
+123:        // Break any cyclical dependencies that may have corrupted the saved graph
+124:        const visited = new Set<string>();
+125:        const path = new Set<string>();
+126:
+127:        const checkCycle = (id: string) => {
+128:          if (path.has(id)) return true; // Cycle detected
+129:          if (visited.has(id)) return false; // Already checked
+130:
+131:          visited.add(id);
+132:          path.add(id);
+133:
+134:          const card = parsed.find((c: Card) => c.id === id);
+135:          if (card && card.parentId) {
+136:            if (checkCycle(card.parentId)) {
+137:              card.parentId = null; // Break cycle by placing it in the root window
+138:            }
+139:          }
+140:          path.delete(id);
+141:          return false;
+142:        };
+143:
+144:        parsed.forEach((c: Card) => checkCycle(c.id));
+145:        return parsed;
+146:      } catch (e) {
+147:        return [];
+148:      }
+149:    }
+150:    return [
+151:      {
+152:        id: crypto.randomUUID(),
+153:        text: "Одиночное нажатие - отметить",
+154:        completed: false,
+155:        createdAt: Date.now(),
+156:        colorClass: getRandomColor(),
+157:        parentId: null,
+158:      },
+159:      {
+160:        id: crypto.randomUUID(),
+161:        text: "Удержание - редактировать",
+162:        completed: false,
+163:        createdAt: Date.now() + 1,
+164:        colorClass: getRandomColor(),
+165:        parentId: null,
+166:      },
+167:      {
+168:        id: crypto.randomUUID(),
+169:        text: "Передвигайте карточки, зажав за любую область",
+170:        completed: false,
+171:        createdAt: Date.now() + 2,
+172:        colorClass: getRandomColor(),
+173:        parentId: null,
+174:      },
+175:    ];
+176:  });
+177:
+178:  const [currentParentId, setCurrentParentId] = useState<string | null>(null);
+179:  const currentParent = useMemo(
+180:    () => cards.find((c) => c.id === currentParentId),
+181:    [cards, currentParentId],
+182:  );
+183:
+184:  const [windows, setWindows] = useState<{ id: string; name: string }[]>(() => {
+185:    const saved = localStorage.getItem("memoryWindows");
+186:    return saved ? JSON.parse(saved) : [{ id: "w1", name: "L1" }];
+187:  });
+188:  const [activeWindowId, setActiveWindowId] = useState(() => {
+189:    return localStorage.getItem("memoryActiveWindow") || "w1";
+190:  });
+191:  const [isEditingWindow, setIsEditingWindow] = useState(false);
+192:  const [editWindowName, setEditWindowName] = useState("");
+193:  const [showWindowDropdown, setShowWindowDropdown] = useState(false);
+194:
+195:  const windowInputRef = useRef<HTMLInputElement>(null);
+196:
+197:  useEffect(() => {
+198:    localStorage.setItem("memoryWindows", JSON.stringify(windows));
+199:  }, [windows]);
+200:
+201:  useEffect(() => {
+202:    localStorage.setItem("memoryActiveWindow", activeWindowId);
+203:  }, [activeWindowId]);
+204:
+205:  useEffect(() => {
+206:    if (isEditingWindow && windowInputRef.current) {
+207:      windowInputRef.current.focus();
+208:      windowInputRef.current.setSelectionRange(
+209:        0,
+210:        windowInputRef.current.value.length,
+211:      );
+212:    }
+213:  }, [isEditingWindow]);
+214:
+215:  const activeWindow =
+216:    windows.find((w) => w.id === activeWindowId) || windows[0];
+217:
+218:  const handleAddWindow = () => {
+219:    let nextNum = 1;
+220:    windows.forEach((w) => {
+221:      if (w.name.startsWith("L")) {
+222:        const num = parseInt(w.name.slice(1));
+223:        if (!isNaN(num) && num >= nextNum) nextNum = num + 1;
+224:      }
+225:    });
+226:    const newWindow = { id: "w_" + Date.now(), name: "L" + nextNum };
+227:    setWindows([...windows, newWindow]);
+228:    setActiveWindowId(newWindow.id);
+229:  };
+230:
+231:  const [isRemoveWindowArmed, setIsRemoveWindowArmed] = useState(false);
+232:  const removeWindowTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+233:
+234:  const handleRemoveWindowClick = () => {
+235:    if (activeWindowId === "w1") return; // Cannot delete L1
+236:
+237:    if (!isRemoveWindowArmed) {
+238:      setIsRemoveWindowArmed(true);
+239:      if (removeWindowTimeoutRef.current)
+240:        clearTimeout(removeWindowTimeoutRef.current);
+241:      removeWindowTimeoutRef.current = setTimeout(
+242:        () => setIsRemoveWindowArmed(false),
+243:        3000,
+244:      );
+245:    } else {
+246:      // Delete all cards that belong to this window and their children
+247:      setCards((prev) => {
+248:        const rootIdsToRemove = prev
+249:          .filter(
+250:            (c) =>
+251:              c.parentId === null && (c.windowId || "w1") === activeWindowId,
+252:          )
+253:          .map((c) => c.id);
+254:        const allIdsToRemove = getDependentIds(rootIdsToRemove, prev);
+255:        rootIdsToRemove.forEach((id) => allIdsToRemove.add(id));
+256:        return prev.filter((c) => !allIdsToRemove.has(c.id));
+257:      });
+258:
+259:      const filtered = windows.filter((w) => w.id !== activeWindowId);
+260:      setWindows(filtered);
+261:      setActiveWindowId(filtered[0].id);
+262:      setIsRemoveWindowArmed(false);
+263:      if (removeWindowTimeoutRef.current)
+264:        clearTimeout(removeWindowTimeoutRef.current);
+265:    }
+266:  };
+267:
+268:  const cycleWindow = () => {
+269:    const currentIndex = windows.findIndex((w) => w.id === activeWindowId);
+270:    const nextIndex = (currentIndex + 1) % windows.length;
+271:    setActiveWindowId(windows[nextIndex].id);
+272:    setShowWindowDropdown(false);
+273:  };
+274:
+275:  const listViewToggleGestures = useLongPress({
+276:    onClick: () => {
+277:      clearInteractions("viewMode");
+278:      setIsListView((prev) => !prev);
+279:    },
+280:    onLongPress: () => {
+281:      clearInteractions("viewMode");
+282:      if ("vibrate" in navigator) navigator.vibrate(50);
+283:      setTextAlign((prev) => (prev === "center" ? "left" : "center"));
+284:    },
+285:    ms: 400,
+286:  });
+287:
+288:  const windowLongPress = useLongPress({
+289:    onClick: () => {
+290:      if (isEditingWindow) return;
+291:      cycleWindow();
+292:    },
+293:    onDoubleClick: () => {
+294:      if (isEditingWindow) return;
+295:      setShowWindowDropdown((prev) => !prev);
+296:    },
+297:    onLongPress: () => {
+298:      if ("vibrate" in navigator) navigator.vibrate(50);
+299:      setEditWindowName(activeWindow.name);
+300:      setIsEditingWindow(true);
+301:      setShowWindowDropdown(false);
+302:    },
+303:    ms: 400,
+304:  });
+305:
+306:  const saveWindowName = () => {
+307:    setIsEditingWindow(false);
+308:    if (!editWindowName.trim()) return;
+309:    setWindows(
+310:      windows.map((w) =>
+311:        w.id === activeWindowId ? { ...w, name: editWindowName.trim() } : w,
+312:      ),
+313:    );
+314:  };
+315:
+316:  const getDependentIds = useCallback((rootIds: string[], allCards: Card[]) => {
+317:    const ids = new Set(rootIds);
+318:    let added = true;
+319:    while (added) {
+320:      added = false;
+321:      for (const c of allCards) {
+322:        if (c.parentId && ids.has(c.parentId) && !ids.has(c.id)) {
+323:          ids.add(c.id);
+324:          added = true;
+325:        }
+326:      }
+327:    }
+328:    return ids;
+329:  }, []);
+330:
+331:  const [inputText, setInputText] = useState("");
+332:  const [isAddingNote, setIsAddingNote] = useState(false);
+333:  const [isSearchActive, setIsSearchActive] = useState(false);
+334:  const [searchQuery, setSearchQuery] = useState("");
+335:  const [voiceMode, setVoiceMode] = useState<VoiceMode>("single");
+336:  const [showMicMenu, setShowMicMenu] = useState(false);
+337:  const [hoveredMicOption, setHoveredMicOption] = useState<VoiceMode | null>(null);
+338:  const micTimerRef = useRef<NodeJS.Timeout | null>(null);
+339:  const [isListening, setIsListening] = useState(false);
+340:  const [voiceContext, setVoiceContext] = useState<"note" | "search">("note");
+341:  const textAreaRef = useRef<HTMLTextAreaElement>(null);
+342:
+343:  useEffect(() => {
+344:    let timeout: NodeJS.Timeout;
+345:    if (isAddingNote && !inputText.trim() && !isListening) {
+346:      timeout = setTimeout(() => {
+347:        setIsAddingNote(false);
+348:      }, 7000);
+349:    }
+350:    return () => clearTimeout(timeout);
+351:  }, [isAddingNote, inputText, isListening]);
+352:
+353:  const [isSearchFocused, setIsSearchFocused] = useState(false);
+354:
+355:  useEffect(() => {
+356:    let searchTimeout: NodeJS.Timeout;
+357:    if (isSearchActive && !searchQuery.trim() && !isSearchFocused && !isListening) {
+358:      searchTimeout = setTimeout(() => {
+359:        setIsSearchActive(false);
+360:      }, 7000);
+361:    }
+362:    return () => clearTimeout(searchTimeout);
+363:  }, [isSearchActive, searchQuery, isSearchFocused, isListening]);
+364:
+365:
+366:  useEffect(() => {
+367:    if (textAreaRef.current && isAddingNote) {
+368:      textAreaRef.current.style.height = "55px";
+369:      textAreaRef.current.style.height = Math.max(55, textAreaRef.current.scrollHeight) + "px";
+370:      // Auto scroll to bottom
+371:      textAreaRef.current.scrollTop = textAreaRef.current.scrollHeight;
+372:    }
+373:  }, [inputText, isAddingNote]);
+374:
+375:  const [isListView, setIsListView] = useState(
+376:    () => localStorage.getItem("memoryListView") === "true",
+377:  );
+378:
+379:  const [clipboardError, setClipboardError] = useState<string | null>(null);
+380:
+381:  useEffect(() => {
+382:    localStorage.setItem("memoryListView", isListView.toString());
+383:  }, [isListView]);
+384:
+385:  const [textAlign, setTextAlign] = useState<"center" | "left">(() => {
+386:    return (
+387:      (localStorage.getItem("memoryTextAlign") as "center" | "left") || "center"
+388:    );
+389:  });
+390:
+391:  useEffect(() => {
+392:    localStorage.setItem("memoryTextAlign", textAlign);
+393:  }, [textAlign]);
+394:
+395:  const [fontSize, setFontSize] = useState(() =>
+396:    parseFloat(localStorage.getItem("memoryFontSize") || "1.125"),
+397:  );
+398:  const [lineHeight, setLineHeight] = useState(() =>
+399:    parseFloat(localStorage.getItem("memoryLineHeight") || "1.25"),
+400:  );
+401:
+402:  const FONTS = [
+403:    "Inter",
+404:    "Roboto Mono",
+405:    "Fira Code",
+406:    "Ubuntu Mono",
+407:    "Jura",
+408:    "Exo 2",
+409:    "Rubik",
+410:    "Montserrat",
+411:    "Oswald",
+412:    "Playfair Display",
+413:    "Cormorant Garamond",
+414:    "PT Serif",
+415:    "Merriweather",
+416:    "Caveat",
+417:    "Comfortaa",
+418:    "Amatic SC",
+419:    "Neucha",
+420:    "Marck Script",
+421:    "Kelly Slab",
+422:    "Russo One",
+423:  ];
+424:  const [fontIndex, setFontIndex] = useState(() =>
+425:    Math.max(
+426:      0,
+427:      FONTS.indexOf(localStorage.getItem("memoryFontFamily") || "Inter"),
+428:    ),
+429:  );
+430:
+431:  const [textMode, setTextMode] = useState<
+432:    "none" | "size" | "lineHeight" | "family"
+433:  >("none");
+434:  const fontTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+435:  
+436:  const [showTextModeMenu, setShowTextModeMenu] = useState(false);
+437:  const [hoveredTextMode, setHoveredTextMode] = useState<"size" | "lineHeight" | "family" | null>(null);
+438:  const textModeTimerRef = useRef<NodeJS.Timeout | null>(null);
+439:
+440:  const [isSelectingCards, setIsSelectingCards] = useState(false);
+441:  const [selectionStep, setSelectionStep] = useState(0);
+442:  const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(
+443:    new Set(),
+444:  );
+445:
+446:  const [showSelectMenu, setShowSelectMenu] = useState(false);
+447:  const [hoveredSelectMode, setHoveredSelectMode] = useState<"all" | "active" | "completed" | null>(null);
+448:  const selectTimerRef = useRef<NodeJS.Timeout | null>(null);
+449:
+450:  const resetFontTimeout = useCallback(() => {
+451:    if (fontTimeoutRef.current) clearTimeout(fontTimeoutRef.current);
+452:    fontTimeoutRef.current = setTimeout(() => {
+453:      setTextMode("none");
+454:    }, 7000);
+455:  }, []);
+456:
+457:  useEffect(() => {
+458:    localStorage.setItem("memoryFontSize", fontSize.toString());
+459:  }, [fontSize]);
+460:
+461:  useEffect(() => {
+462:    localStorage.setItem("memoryLineHeight", lineHeight.toString());
+463:  }, [lineHeight]);
+464:
+465:  useEffect(() => {
+466:    localStorage.setItem("memoryFontFamily", FONTS[fontIndex]);
+467:  }, [fontIndex]);
+468:
+469:  // Dragging & Editing state
+470:  const [activeId, setActiveId] = useState<string | null>(null);
+471:  const [editingCardId, setEditingCardId] = useState<string | null>(null);
+472:  const [activeCardHistory, setActiveCardHistory] = useState({ canUndo: false, canRedo: false });
+473:  
+474:  useEffect(() => {
+475:    const handleHistoryState = (e: any) => {
+476:      setActiveCardHistory(e.detail);
+477:    };
+478:    document.addEventListener("active-card-history-state", handleHistoryState);
+479:    return () => document.removeEventListener("active-card-history-state", handleHistoryState);
+480:  }, []);
+481:  
+482:  const [overId, setOverId] = useState<string | null>(null);
+483:  const [dragOffset, setDragOffset] = useState(0);
+484:
+485:  const recognitionRef = useRef<any>(null);
+486:  const voiceModeRef = useRef(voiceMode);
+487:  const isListeningRef = useRef(isListening);
+488:  const voiceContextRef = useRef(voiceContext);
+489:  const currentParentIdRef = useRef(currentParentId);
+490:  const lastTranscriptRef = useRef<{ text: string; time: number }>({
+491:    text: "",
+492:    time: 0,
+493:  });
+494:  const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+495:  const activeTabRef = useRef<HTMLButtonElement>(null);
+496:  const speechBufferRef = useRef<string>("");
+497:  const speechCommitTimerRef = useRef<NodeJS.Timeout | null>(null);
+498:
+499:  useEffect(() => {
+500:    localStorage.setItem("memoryCards", JSON.stringify(cards));
+501:  }, [cards]);
+502:
+503:  useEffect(() => {
+504:    if (activeTabRef.current) {
+505:      activeTabRef.current.scrollIntoView({
+506:        behavior: "smooth",
+507:        inline: "center",
+508:        block: "nearest",
+509:      });
+510:    }
+511:  }, [currentParentId]);
+512:
+513:  useEffect(() => {
+514:    voiceModeRef.current = voiceMode;
+515:  }, [voiceMode]);
+516:
+517:  useEffect(() => {
+518:    isListeningRef.current = isListening;
+519:  }, [isListening]);
+520:
+521:  useEffect(() => {
+522:    voiceContextRef.current = voiceContext;
+523:  }, [voiceContext]);
+524:
+525:  useEffect(() => {
+526:    currentParentIdRef.current = currentParentId;
+527:  }, [currentParentId]);
+528:
+529:  const windowIdRef = useRef(activeWindowId);
+530:  useEffect(() => {
+531:    windowIdRef.current = activeWindowId;
+532:  }, [activeWindowId]);
+533:
+534:  const addCard = useCallback((text: string) => {
+535:    if (!text.trim()) return;
+536:    setCards((prev) => {
+537:      let color = getRandomColor();
+538:      if (currentParentIdRef.current) {
+539:        const parentCard = prev.find(c => c.id === currentParentIdRef.current);
+540:        if (parentCard && parentCard.colorClass) {
+541:          color = darkenHsl(parentCard.colorClass, 3);
+542:        }
+543:      }
+544:
+545:      const newArr = [
+546:        {
+547:          id: crypto.randomUUID(),
+548:          text: text.trim(),
+549:          completed: false,
+550:          createdAt: Date.now(),
+551:          colorClass: color,
+552:          parentId: currentParentIdRef.current,
+553:          windowId: windowIdRef.current,
+554:        },
+555:        ...prev,
+556:      ];
+557:      return newArr.sort((a, b) => {
+558:        if (a.completed !== b.completed) return a.completed ? 1 : -1;
+559:        if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+560:        return 0;
+561:      });
+562:    });
+563:  }, []);
+564:
+565:  const handleVoiceTranscription = useCallback(
+566:    (transcript: string) => {
+567:      const mode = voiceModeRef.current;
+568:      if (mode === "single" || mode === "continuous") {
+569:        addCard(transcript);
+570:      } else {
+571:        const words = transcript.split(/\s+/).filter((w) => {
+572:          const cleaned = w.trim().replace(/[.,!?]/g, "");
+573:          return cleaned.length > 3;
+574:        });
+575:        words.forEach((word) => addCard(word));
+576:      }
+577:    },
+578:    [addCard],
+579:  );
+580:
+581:  // Web Speech API Initialization (Runs exactly once)
+582:  useEffect(() => {
+583:    // @ts-ignore
+584:    const SpeechRecognition =
+585:      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+586:    if (SpeechRecognition && !recognitionRef.current) {
+587:      const recognition = new SpeechRecognition();
+588:      recognitionRef.current = recognition;
+589:      recognition.lang = "ru-RU";
+590:      recognition.interimResults = true; // Show text while speaking for better feedback
+591:      recognition.continuous = false; // Analyze phrase fully, then stop and trigger onresult
+592:      recognition.maxAlternatives = 1;
+593:
+594:      recognition.onresult = (event: any) => {
+595:        if (!isListeningRef.current) return;
+596:        const mode = voiceContextRef.current === "search" ? "single" : voiceModeRef.current;
+597:        if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
+598:
+599:        if (mode !== "continuous") {
+600:          silenceTimeoutRef.current = setTimeout(() => {
+601:            setIsListening(false);
+602:            isListeningRef.current = false;
+603:            recognitionRef.current?.stop();
+604:          }, 5000);
+605:        }
+606:
+607:        let currentInterim = "";
+608:        let currentFinal = "";
+609:        for (let i = event.resultIndex; i < event.results.length; ++i) {
+610:          if (event.results[i].isFinal) {
+611:            currentFinal += event.results[i][0].transcript + " ";
+612:          } else {
+613:            currentInterim += event.results[i][0].transcript + " ";
+614:          }
+615:        }
+616:
+617:        currentFinal = currentFinal.trim();
+618:        currentInterim = currentInterim.trim();
+619:        
+620:        const combinedLower = (currentFinal + " " + currentInterim).toLowerCase();
+621:        if (combinedLower.includes("стоп")) {
+622:            setIsListening(false);
+623:            isListeningRef.current = false;
+624:            recognitionRef.current?.stop();
+625:            
+626:            if (mode === "continuous") {
+627:                if (currentFinal) speechBufferRef.current = (speechBufferRef.current + " " + currentFinal).trim();
+628:                const sIdx = speechBufferRef.current.toLowerCase().indexOf("стоп");
+629:                if (sIdx !== -1) {
+630:                    speechBufferRef.current = speechBufferRef.current.slice(0, sIdx).trim();
+631:                }
+632:                if (voiceContextRef.current === "search") {
+633:                    setSearchQuery(speechBufferRef.current);
+634:                } else {
+635:                    setInputText(speechBufferRef.current);
+636:                }
+637:            } else {
+638:                let chunk = currentFinal ? currentFinal.toLowerCase().split("стоп")[0].trim() : currentInterim.toLowerCase().split("стоп")[0].trim();
+639:                if (voiceContextRef.current === "search") {
+640:                    setSearchQuery(chunk);
+641:                } else {
+642:                    if (currentFinal && chunk) handleVoiceTranscription(chunk);
+643:                    else setInputText(chunk);
+644:                }
+645:            }
+646:            return;
+647:        }
+648:
+649:        if (mode === "continuous") {
+650:            if (currentFinal) {
+651:               speechBufferRef.current = (speechBufferRef.current + " " + currentFinal).trim();
+652:            }
+653:            
+654:            let lower = speechBufferRef.current.toLowerCase();
+655:
+656:            while (lower.includes("помни")) {
+657:                let pIdx = lower.indexOf("помни");
+658:                let textBefore = speechBufferRef.current.slice(0, pIdx).trim();
+659:                if (textBefore) {
+660:                    addCard(textBefore);
+661:                }
+662:                speechBufferRef.current = speechBufferRef.current.slice(pIdx + 5).trim();
+663:                lower = speechBufferRef.current.toLowerCase();
+664:            }
+665:            
+666:            if (voiceContextRef.current === "search") {
+667:                setSearchQuery((speechBufferRef.current + (currentInterim ? " " + currentInterim : "")).trim());
+668:            } else {
+669:                setInputText((speechBufferRef.current + (currentInterim ? " " + currentInterim : "")).trim());
+670:            }
+671:        } else {
+672:            if (currentFinal) {
+673:              if (voiceContextRef.current === "search") {
+674:                setSearchQuery(currentFinal);
+675:                setIsListening(false);
+676:                isListeningRef.current = false;
+677:                recognitionRef.current?.stop();
+678:              } else {
+679:                handleVoiceTranscription(currentFinal);
+680:                setInputText("");
+681:              }
+682:            } else {
+683:              if (voiceContextRef.current === "search") {
+684:                setSearchQuery(currentInterim);
+685:              } else {
+686:                setInputText(currentInterim);
+687:              }
+688:            }
+689:        }
+690:      };
+691:
+692:      recognition.onerror = (event: any) => {
+693:        console.error("Speech recognition error", event.error);
+694:        if (event.error !== "no-speech") {
+695:          setIsListening(false);
+696:          setInputText("");
+697:        }
+698:      };
+699:
+700:      recognition.onend = () => {
+701:        // Automatically restart if user hasn't explicitly tapped the mic to stop
+702:        if (isListeningRef.current) {
+703:          try {
+704:            recognition.continuous = false;
+705:            recognition.start();
+706:          } catch (e) {
+707:            setIsListening(false);
+708:          }
+709:        } else {
+710:          // Don't clear input text here
+711:        }
+712:      };
+713:    }
+714:  }, [handleVoiceTranscription]);
+715:
+716:  useEffect(() => {
+717:    if (isListening) {
+718:      if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
+719:      silenceTimeoutRef.current = setTimeout(() => {
+720:        setIsListening(false);
+721:        isListeningRef.current = false;
+722:        if (recognitionRef.current) recognitionRef.current.stop();
+723:      }, 5000); // 5 seconds instead of 10
+724:    } else {
+725:      if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
+726:    }
+727:  }, [isListening]);
+728:
+729:  const handleEditStateChange = useCallback((id: string, isEditing: boolean) => {
+730:    if (isEditing) {
+731:      setEditingCardId(id);
+732:    } else {
+733:      setEditingCardId((prev) => (prev === id ? null : prev));
+734:    }
+735:  }, []);
+736:
+737:  const getCardsInView = () => {
+738:    let viewCards = cards;
+739:    if (isTrashView) {
+740:      viewCards = cards.filter((c) => c.isDeleted);
+741:      if (isSearchActive && searchQuery.trim()) {
+742:        viewCards = viewCards.filter((c) => c.text.toLowerCase().includes(searchQuery.toLowerCase()));
+743:      }
+744:    } else if (isSearchActive && searchQuery.trim()) {
+745:      viewCards = cards.filter((c) => !c.isDeleted && c.text.toLowerCase().includes(searchQuery.toLowerCase()));
+746:    } else if (currentParentId) {
+747:      viewCards = cards.filter((c) => !c.isDeleted && c.parentId === currentParentId);
+748:    } else {
+749:      viewCards = cards.filter(
+750:        (c) => !c.isDeleted && c.parentId === null && (c.windowId || "w1") === activeWindowId,
+751:      );
+752:    }
+753:    return viewCards;
+754:  };
+755:
+756:  const searchBtnLongPress = useLongPress({
+757:    onClick: () => {
+758:      clearInteractions("search");
+759:      setIsSearchActive(!isSearchActive);
+760:    },
+761:    onLongPress: () => {
+762:      clearInteractions("search");
+763:      if ("vibrate" in navigator) navigator.vibrate(50);
+764:      if (document.activeElement instanceof HTMLElement) {
+765:        document.activeElement.blur();
+766:      }
+767:      try {
+768:        if (!isListeningRef.current && recognitionRef.current) {
+769:          recognitionRef.current.continuous = false; // Search mode should always be single phrase
+770:          recognitionRef.current.start();
+771:        }
+772:      } catch (err) {
+773:        console.error(err);
+774:      }
+775:      setVoiceContext("search");
+776:      speechBufferRef.current = "";
+777:      setSearchQuery("");
+778:      setIsListening(true);
+779:      isListeningRef.current = true;
+780:      setIsSearchActive(true);
+781:    },
+782:    ms: 500
+783:  });
+784:
+785:  const hasCardsToInsert =
+786:    isSelectingCards &&
+787:    selectedCardIds.size > 0 &&
+788:    Array.from(selectedCardIds).some(
+789:      (id) => {
+790:        const c = cards.find((c) => c.id === id);
+791:        // A card is considered "foreign" (to be inserted) if its parent is not the current view's parent,
+792:        // AND it's also not the current view's parent itself.
+793:        return c?.id !== currentParentId && c?.parentId !== currentParentId || c?.isDeleted;
+794:      }
+795:    );
+796:
+797:  const hasCardsToPinToggle = isSelectingCards && selectedCardIds.size > 0 && !hasCardsToInsert;
+798:  const areAllSelectedPinned = hasCardsToPinToggle && Array.from(selectedCardIds).every(id => cards.find(c => c.id === id)?.isPinned);
+799:
+800:  const noteBtnLongPress = useLongPress({
+801:    onClick: () => {
+802:      if (hasCardsToInsert) {
+803:        setCards((prev) => {
+804:          const isAncestor = (ancestorId: string, targetId: string | null) => {
+805:            let curr = targetId;
+806:            const visited = new Set<string>();
+807:            while (curr) {
+808:              if (curr === ancestorId) return true;
+809:              if (visited.has(curr)) break; // Detect existing cycles
+810:              visited.add(curr);
+811:              const parent = prev.find((c) => c.id === curr);
+812:              curr = parent ? parent.parentId : null;
+813:            }
+814:            return false;
+815:          };
+816:
+817:          const validSelectedIds = new Set(
+818:            Array.from(selectedCardIds).filter((id) => !isAncestor(id as string, currentParentId))
+819:          );
+820:
+821:          return prev.map((c) =>
+822:            validSelectedIds.has(c.id)
+823:              ? {
+824:                  ...c,
+825:                  isDeleted: false,
+826:                  parentId: currentParentId,
+827:                  windowId: currentParentId ? c.windowId : activeWindowId,
+828:                }
+829:              : c
+830:          );
+831:        });
+832:        setIsSelectingCards(false);
+833:        setSelectionStep(0);
+834:        setSelectedCardIds(new Set());
+835:        return;
+836:      }
+837:      if (hasCardsToPinToggle) {
+838:        setCards((prev) => 
+839:          prev.map((c) => selectedCardIds.has(c.id) ? { ...c, isPinned: !areAllSelectedPinned } : c)
+840:        );
+841:        setIsSelectingCards(false);
+842:        setSelectionStep(0);
+843:        setSelectedCardIds(new Set());
+844:        return;
+845:      }
+846:      clearInteractions("addingNote");
+847:      setIsAddingNote(!isAddingNote);
+848:    },
+849:    onLongPress: () => {
+850:      if (isSelectingCards || isTrashView) return;
+851:      clearInteractions("addingNote");
+852:      if ("vibrate" in navigator) navigator.vibrate(50);
+853:      setIsAddingNote(true);
+854:    },
+855:    onLongPressEnd: async () => {
+856:      if (isSelectingCards || isTrashView) return;
+857:      try {
+858:        const text = await navigator.clipboard.readText();
+859:        if (text) {
+860:          setInputText(text);
+861:          setClipboardError(null);
+862:        }
+863:      } catch (err: any) {
+864:        console.error("Failed to read clipboard:", err);
+865:        setClipboardError("Браузер блокирует буфер обмена. Откройте приложение в новой вкладке (↗).");
+866:        setTimeout(() => setClipboardError(null), 4000);
+867:      }
+868:    },
+869:    ms: 500
+870:  });
+871:
+872:  const stopVoiceRecognition = useCallback(() => {
+873:    if (isListeningRef.current) {
+874:      setIsListening(false);
+875:      isListeningRef.current = false;
+876:      if (recognitionRef.current) {
+877:        recognitionRef.current.stop();
+878:      }
+879:      if (speechCommitTimerRef.current) {
+880:        clearTimeout(speechCommitTimerRef.current);
+881:      }
+882:    }
+883:  }, []);
+884:
+885:  const handleManualAdd = (e?: React.FormEvent) => {
+886:    if (e) e.preventDefault();
+887:    if (textMode !== "none") return;
+888:
+889:    if (isListeningRef.current) {
+890:      stopVoiceRecognition();
+891:    }
+892:
+893:    if (inputText.trim()) {
+894:      addCard(inputText);
+895:    }
+896:    setInputText("");
+897:    speechBufferRef.current = "";
+898:  };
+899:
+900:  const toggleCardState = (id: string) => {
+901:    if ("vibrate" in navigator) navigator.vibrate(50);
+902:    setCards((prev) => {
+903:      // First, just toggle the state immediately for visual response
+904:      return prev.map((c) =>
+905:        c.id === id ? { ...c, completed: !c.completed } : c,
+906:      );
+907:    });
+908:
+909:    // Then sort with a delay so the user sees the card deactivate before it moves down
+910:    setTimeout(() => {
+911:      setCards((prev) => {
+912:        const sorted = [...prev].sort((a, b) => {
+913:          if (a.completed !== b.completed) return a.completed ? 1 : -1;
+914:          if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+915:          return 0;
+916:        });
+917:        return sorted;
+918:      });
+919:    }, 5000);
+920:  };
+921:
+922:  const updateCard = (id: string, updates: Partial<Card>) => {
+923:    setCards((prev) => {
+924:      let next = prev.map((c) => (c.id === id ? { ...c, ...updates } : c));
+925:      
+926:      if (updates.colorClass) {
+927:        const queue = [{ id, color: updates.colorClass }];
+928:        while(queue.length > 0) {
+929:          const { id: parentId, color: parentColor } = queue.shift()!;
+930:          const children = next.filter(c => c.parentId === parentId);
+931:          for (const child of children) {
+932:            const childColor = darkenHsl(parentColor, 3);
+933:            next = next.map(c => c.id === child.id ? { ...c, colorClass: childColor } : c);
+934:            queue.push({ id: child.id, color: childColor });
+935:          }
+936:        }
+937:      }
+938:      return next;
+939:    });
+940:  };
+941:
+942:  const deleteCard = (id: string) => {
+943:    setCards((prev) => {
+944:      const idsToRemove = getDependentIds([id], prev);
+945:      if (currentParentId && idsToRemove.has(currentParentId)) {
+946:        setTimeout(() => {
+947:          setCurrentParentId((prevId) => {
+948:            if (!prevId) return prevId;
+949:             const p = prev.find(c => c.id === prevId);
+950:             return p?.parentId || null;
+951:          });
+952:        }, 0);
+953:      }
+954:      if (isTrashView) {
+955:        return prev.filter((c) => !idsToRemove.has(c.id));
+956:      }
+957:      return prev.map((c) => idsToRemove.has(c.id) ? { ...c, isDeleted: true } : c);
+958:    });
+959:  };
+960:
+961:  const toggleVoiceMode = () => {
+962:    setVoiceMode((prev) =>
+963:      prev === "single"
+964:        ? "multiple"
+965:        : prev === "multiple"
+966:          ? "continuous"
+967:          : "single",
+968:    );
+969:  };
+970:
+971:  const handleMicPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+972:    // Only allow main button (left click) or touch
+973:    if (e.button !== 0) return;
+974:    
+975:    e.currentTarget.setPointerCapture(e.pointerId);
+976:    micTimerRef.current = setTimeout(() => {
+977:      setShowMicMenu(true);
+978:      if ("vibrate" in navigator) navigator.vibrate(50);
+979:    }, 400);
+980:  };
+981:
+982:  const handleMicPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+983:    if (!showMicMenu) return;
+984:    
+985:    // Find what element is under pointer
+986:    const els = document.elementsFromPoint(e.clientX, e.clientY);
+987:    let foundMode: VoiceMode | null = null;
+988:    for (const el of els) {
+989:      const mode = el.getAttribute('data-mic-mode') as VoiceMode | null;
+990:      if (mode) {
+991:        foundMode = mode;
+992:        break;
+993:      }
+994:    }
+995:    
+996:    if (hoveredMicOption !== foundMode) {
+997:      setHoveredMicOption(foundMode);
+998:      if (foundMode && "vibrate" in navigator) navigator.vibrate(20);
+999:    }
+1000:  };
+1001:
+1002:  const handleMicPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+1003:    if (micTimerRef.current) {
+1004:      clearTimeout(micTimerRef.current);
+1005:      micTimerRef.current = null;
+1006:    }
+1007:    
+1008:    e.currentTarget.releasePointerCapture(e.pointerId);
+1009:    
+1010:    if (showMicMenu) {
+1011:      if (hoveredMicOption) {
+1012:        setVoiceMode(hoveredMicOption);
+1013:      }
+1014:      setShowMicMenu(false);
+1015:      setHoveredMicOption(null);
+1016:    } else {
+1017:      // Short click
+1018:      handleMicClick();
+1019:    }
+1020:  };
+1021:
+1022:  const handleTextModePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+1023:    if (e.button !== 0) return;
+1024:    clearInteractions("textMode");
+1025:    e.currentTarget.setPointerCapture(e.pointerId);
+1026:    textModeTimerRef.current = setTimeout(() => {
+1027:      setShowTextModeMenu(true);
+1028:      if ("vibrate" in navigator) navigator.vibrate(50);
+1029:    }, 400);
+1030:  };
+1031:
+1032:  const handleTextModePointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+1033:    if (!showTextModeMenu) return;
+1034:    const els = document.elementsFromPoint(e.clientX, e.clientY);
+1035:    let foundMode: "size" | "lineHeight" | "family" | null = null;
+1036:    for (const el of els) {
+1037:      const mode = el.getAttribute('data-text-mode') as "size" | "lineHeight" | "family" | null;
+1038:      if (mode) {
+1039:        foundMode = mode;
+1040:        break;
+1041:      }
+1042:    }
+1043:    if (hoveredTextMode !== foundMode) {
+1044:      setHoveredTextMode(foundMode);
+1045:      if (foundMode && "vibrate" in navigator) navigator.vibrate(20);
+1046:    }
+1047:  };
+1048:
+1049:  const handleTextModePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+1050:    if (textModeTimerRef.current) {
+1051:      clearTimeout(textModeTimerRef.current);
+1052:      textModeTimerRef.current = null;
+1053:    }
+1054:    e.currentTarget.releasePointerCapture(e.pointerId);
+1055:    
+1056:    if (showTextModeMenu) {
+1057:      if (hoveredTextMode) {
+1058:        setTextMode(hoveredTextMode);
+1059:        resetFontTimeout();
+1060:      }
+1061:      setShowTextModeMenu(false);
+1062:      setHoveredTextMode(null);
+1063:    } else {
+1064:      // Short click behaviour from modeLongPress.onClick
+1065:      if (isDeletingMode) {
+1066:        setIsDeletingMode(false);
+1067:        clearDeletingTimeout();
+1068:        setSelectedCardIds(new Set());
+1069:        if ("vibrate" in navigator) navigator.vibrate(50);
+1070:        return;
+1071:      }
+1072:      if (isSelectingCards) {
+1073:        resetDeletingTimeout();
+1074:        setIsSelectingCards(false);
+1075:        setSelectionStep(0);
+1076:        setSelectedCardIds(new Set());
+1077:        if ("vibrate" in navigator) navigator.vibrate(50);
+1078:        return;
+1079:      }
+1080:      if (isAddingNote && inputText.length > 0) {
+1081:        setInputText("");
+1082:        if ("vibrate" in navigator) navigator.vibrate(50);
+1083:        return;
+1084:      }
+1085:      if (isSearchActive && searchQuery.length > 0) {
+1086:        setSearchQuery("");
+1087:        if ("vibrate" in navigator) navigator.vibrate(50);
+1088:        return;
+1089:      }
+1090:
+1091:      if (textMode === "size") {
+1092:        setFontSize((f) => Math.max(0.6, +(f - 0.01).toFixed(3)));
+1093:        resetFontTimeout();
+1094:        return;
+1095:      } else if (textMode === "lineHeight") {
+1096:        setLineHeight((l) => Math.max(0.8, +(l - 0.05).toFixed(2)));
+1097:        resetFontTimeout();
+1098:        return;
+1099:      } else if (textMode === "family") {
+1100:        setFontIndex((i) => (i - 1 + FONTS.length) % FONTS.length);
+1101:        resetFontTimeout();
+1102:        return;
+1103:      }
+1104:      
+1105:      // If none, behave as Back button
+1106:      if (isTrashView) {
+1107:        setIsTrashView(false);
+1108:      } else if (currentParentId) {
+1109:        const p = cards.find((c) => c.id === currentParentId);
+1110:        setCurrentParentId(p?.parentId || null);
+1111:        if ("vibrate" in navigator) navigator.vibrate(50);
+1112:      }
+1113:    }
+1114:  };
+1115:
+1116:  const handleSelectPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+1117:    if (e.button !== 0) return;
+1118:    clearInteractions("selecting");
+1119:    e.currentTarget.setPointerCapture(e.pointerId);
+1120:    selectTimerRef.current = setTimeout(() => {
+1121:      setShowSelectMenu(true);
+1122:      if ("vibrate" in navigator) navigator.vibrate(50);
+1123:    }, 400);
+1124:  };
+1125:
+1126:  const handleSelectPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+1127:    if (!showSelectMenu) return;
+1128:    const els = document.elementsFromPoint(e.clientX, e.clientY);
+1129:    let foundMode: "all" | "active" | "completed" | null = null;
+1130:    for (const el of els) {
+1131:      const mode = el.getAttribute('data-select-mode') as "all" | "active" | "completed" | null;
+1132:      if (mode) {
+1133:        foundMode = mode;
+1134:        break;
+1135:      }
+1136:    }
+1137:    if (hoveredSelectMode !== foundMode) {
+1138:      setHoveredSelectMode(foundMode);
+1139:      if (foundMode && "vibrate" in navigator) navigator.vibrate(20);
+1140:    }
+1141:  };
+1142:
+1143:  const handleSelectPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+1144:    if (selectTimerRef.current) {
+1145:      clearTimeout(selectTimerRef.current);
+1146:      selectTimerRef.current = null;
+1147:    }
+1148:    e.currentTarget.releasePointerCapture(e.pointerId);
+1149:    
+1150:    if (showSelectMenu) {
+1151:      if (hoveredSelectMode) {
+1152:        // Execute block select
+1153:        const viewCards = getCardsInView();
+1154:        let targets: string[] = [];
+1155:        if (hoveredSelectMode === "all") {
+1156:          targets = viewCards.map(c => c.id);
+1157:        } else if (hoveredSelectMode === "active") {
+1158:          targets = viewCards.filter(c => !c.completed).map(c => c.id);
+1159:        } else if (hoveredSelectMode === "completed") {
+1160:          targets = viewCards.filter(c => c.completed).map(c => c.id);
+1161:        }
+1162:        
+1163:        setIsSelectingCards(true);
+1164:        setSelectionStep(1); // 1 = waiting for next command like delete
+1165:        setSelectedCardIds(new Set(targets));
+1166:        resetDeletingTimeout();
+1167:        if ("vibrate" in navigator) navigator.vibrate(50);
+1168:      }
+1169:      setShowSelectMenu(false);
+1170:      setHoveredSelectMode(null);
+1171:    } else {
+1172:      // Short click behaviour
+1173:      if (isSelectingCards || selectionStep > 0) {
+1174:        setIsSelectingCards(false);
+1175:        setSelectionStep(0);
+1176:        setSelectedCardIds(new Set());
+1177:        if ("vibrate" in navigator) navigator.vibrate(50);
+1178:      } else {
+1179:        setIsSelectingCards(true);
+1180:        setSelectionStep(0); // Standard manual select mode without step
+1181:        if ("vibrate" in navigator) navigator.vibrate(50);
+1182:      }
+1183:    }
+1184:  };
+1185:
+1186:  const [isDeletingMode, setIsDeletingMode] = useState(false);
+1187:  const [isTrashView, setIsTrashView] = useState(false);
+1188:  const deletingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+1189:
+1190:  useEffect(() => {
+1191:    let delTimeout: NodeJS.Timeout;
+1192:    if (isDeletingMode && selectedCardIds.size === 0) {
+1193:      delTimeout = setTimeout(() => {
+1194:        setIsDeletingMode(false);
+1195:      }, 7000);
+1196:    }
+1197:    return () => clearTimeout(delTimeout);
+1198:  }, [isDeletingMode, selectedCardIds.size]);
+1199:
+1200:  const resetDeletingTimeout = useCallback(() => {
+1201:    // Replaced by useEffect
+1202:  }, []);
+1203:
+1204:  const clearDeletingTimeout = useCallback(() => {
+1205:    // Replaced by useEffect
+1206:  }, []);
+1207:
+1208:  const clearInteractions = useCallback((skip?: string) => {
+1209:    if (skip !== "textMode") {
+1210:      setTextMode("none");
+1211:      if (fontTimeoutRef.current) clearTimeout(fontTimeoutRef.current);
+1212:    }
+1213:    if (skip !== "addingNote") setIsAddingNote(false);
+1214:    if (skip !== "search") setIsSearchActive(false);
+1215:    if (skip !== "deleting") {
+1216:      setIsDeletingMode(false);
+1217:      clearDeletingTimeout();
+1218:    }
+1219:    if (skip !== "selecting") {
+1220:      setIsSelectingCards(false);
+1221:      setSelectionStep(0);
+1222:      setSelectedCardIds(new Set());
+1223:    }
+1224:  }, [clearDeletingTimeout, setIsAddingNote, setIsSearchActive, setIsDeletingMode, setIsSelectingCards, setSelectionStep, setSelectedCardIds]);
+1225:
+1226:  const copyGestures = useLongPress({
+1227:    onClick: () => {
+1228:      const selectedText = Array.from(selectedCardIds)
+1229:        .map((id) => cards.find((x) => x.id === id))
+1230:        .filter((c) => !!c)
+1231:        .sort((a, b) => (a?.order || 0) - (b?.order || 0))
+1232:        .map((c) => c?.text || "")
+1233:        .filter(Boolean)
+1234:        .join("\r\n\r\n");
+1235:      if (selectedText) {
+1236:        navigator.clipboard.writeText(selectedText);
+1237:        if ("vibrate" in navigator) navigator.vibrate(50);
+1238:      }
+1239:      setIsSelectingCards(false);
+1240:      setSelectionStep(0);
+1241:      setSelectedCardIds(new Set());
+1242:    },
+1243:    onLongPress: () => {
+1244:      let result = "";
+1245:      const topLevelCards = Array.from(selectedCardIds)
+1246:        .map(id => cards.find(c => c.id === id))
+1247:        .filter(c => c !== undefined) as Card[];
+1248:        
+1249:      topLevelCards.sort((a, b) => cards.indexOf(a) - cards.indexOf(b));
+1250:
+1251:      const traverse = (card: Card, indentLevel: number) => {
+1252:        const indent = "    ".repeat(indentLevel);
+1253:        const prefix = indentLevel > 0 ? "- " : "";
+1254:        result += `${indent}${prefix}${card.text}\n\n`;
+1255:        const children = cards
+1256:          .filter(c => c.parentId === card.id && !c.isDeleted)
+1257:          .sort((a, b) => {
+1258:            if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+1259:            if (a.completed !== b.completed) return a.completed ? 1 : -1;
+1260:            return a.order - b.order;
+1261:          });
+1262:        children.forEach(child => traverse(child, indentLevel + 1));
+1263:      }
+1264:      
+1265:      topLevelCards.forEach(c => traverse(c, 0));
+1266:
+1267:      if (result.trim()) {
+1268:        navigator.clipboard.writeText(result.trim());
+1269:        if ("vibrate" in navigator) navigator.vibrate(100);
+1270:      }
+1271:      setIsSelectingCards(false);
+1272:      setSelectionStep(0);
+1273:      setSelectedCardIds(new Set());
+1274:    },
+1275:    ms: 500,
+1276:  });
+1277:
+1278:  const trashGestures = useLongPress({
+1279:    onLongPress: () => {
+1280:      if ("vibrate" in navigator) navigator.vibrate(50);
+1281:      
+1282:      if (isTrashView) {
+1283:        if (!isDeletingMode) {
+1284:          setIsDeletingMode(true);
+1285:          const trashCards = getCardsInView(); 
+1286:          setSelectedCardIds(new Set(trashCards.map(c => c.id)));
+1287:        } else {
+1288:          if (selectedCardIds.size > 0) {
+1289:            setCards((prev) => {
+1290:              const idsToRemove = getDependentIds(Array.from(selectedCardIds), prev);
+1291:              return prev.filter(c => !idsToRemove.has(c.id));
+1292:            });
+1293:            setIsDeletingMode(false);
+1294:            setSelectedCardIds(new Set());
+1295:          }
+1296:        }
+1297:        return;
+1298:      }
+1299:
+1300:      if (!isDeletingMode) {
+1301:        setIsTrashView((prev) => !prev);
+1302:        setCurrentParentId(null);
+1303:        return;
+1304:      }
+1305:
+1306:      if (isDeletingMode) {
+1307:        if (selectedCardIds.size > 0) {
+1308:          setCards((prev) => {
+1309:            const idsToRemove = getDependentIds(
+1310:              Array.from(selectedCardIds),
+1311:              prev,
+1312:            );
+1313:            if (isTrashView) {
+1314:              return prev.filter((c) => !idsToRemove.has(c.id));
+1315:            }
+1316:            return prev.map((c) => idsToRemove.has(c.id) ? { ...c, isDeleted: true } : c);
+1317:          });
+1318:        } else {
+1319:          // No selection -> delete ALL cards in current view
+1320:          setCards((prev) => {
+1321:            const viewCards = getCardsInView();
+1322:            const idsToRemove = getDependentIds(
+1323:              viewCards.map((c) => c.id),
+1324:              prev,
+1325:            );
+1326:            if (isTrashView) {
+1327:              return prev.filter((c) => !idsToRemove.has(c.id));
+1328:            }
+1329:            return prev.map((c) => idsToRemove.has(c.id) ? { ...c, isDeleted: true } : c);
+1330:          });
+1331:        }
+1332:        setIsDeletingMode(false);
+1333:        clearDeletingTimeout();
+1334:        setSelectedCardIds(new Set());
+1335:      }
+1336:    },
+1337:    onClick: () => {
+1338:      if (isDeletingMode) {
+1339:        if (selectedCardIds.size === 0) {
+1340:          // Short click with 0 selection -> delete completed
+1341:          setCards((prev) => {
+1342:            const viewCards = getCardsInView();
+1343:            const completedRoots = viewCards
+1344:              .filter((c) => c.completed)
+1345:              .map((c) => c.id);
+1346:            if (completedRoots.length === 0) return prev;
+1347:            const toRemove = getDependentIds(completedRoots, prev);
+1348:            if (isTrashView) {
+1349:              return prev.filter((c) => !toRemove.has(c.id));
+1350:            }
+1351:            return prev.map((c) => toRemove.has(c.id) ? { ...c, isDeleted: true } : c);
+1352:          });
+1353:        }
+1354:        setIsDeletingMode(false);
+1355:        clearDeletingTimeout();
+1356:        setSelectedCardIds(new Set());
+1357:      } else {
+1358:        clearInteractions("deleting");
+1359:        setIsDeletingMode(true);
+1360:        resetDeletingTimeout();
+1361:      }
+1362:    },
+1363:    ms: 500,
+1364:    vibrate: false,
+1365:  });
+1366:
+1367:  const backgroundGestures = useLongPress({
+1368:    onLongPress: (e) => {
+1369:      if (e.target === e.currentTarget) {
+1370:        if (editingCardId) {
+1371:          if (document.activeElement instanceof HTMLElement) {
+1372:            document.activeElement.blur();
+1373:          }
+1374:        } else {
+1375:          setCurrentParentId(null);
+1376:        }
+1377:      }
+1378:    },
+1379:    onClick: (e) => {
+1380:      if (e.target === e.currentTarget) {
+1381:        if (editingCardId) {
+1382:          if (document.activeElement instanceof HTMLElement) {
+1383:            document.activeElement.blur();
+1384:          }
+1385:        } else if (currentParentId) {
+1386:          const p = cards.find((c) => c.id === currentParentId);
+1387:          setCurrentParentId(p?.parentId || null);
+1388:        }
+1389:      }
+1390:    },
+1391:    ms: 400,
+1392:    vibrate: false,
+1393:  });
+1394:
+1395:  const activeTabLongPress = useLongPress({
+1396:    onLongPress: () => {
+1397:      setIsTreeView((prev) => !prev);
+1398:      if ("vibrate" in navigator) navigator.vibrate(50);
+1399:    },
+1400:    onClick: () => {
+1401:      if (currentParentId) updateCard(currentParentId, { colorClass: getRandomColor() });
+1402:    },
+1403:    ms: 400,
+1404:  });
+1405:
+1406:  const handleMicClick = () => {
+1407:    clearInteractions("mic");
+1408:    setVoiceContext("note");
+1409:    if (!recognitionRef.current) {
+1410:      return;
+1411:    }
+1412:
+1413:    if (isListeningRef.current) {
+1414:      setIsListening(false);
+1415:      isListeningRef.current = false;
+1416:      recognitionRef.current.stop();
+1417:      if (speechCommitTimerRef.current)
+1418:        clearTimeout(speechCommitTimerRef.current);
+1419:    } else {
+1420:      if (document.activeElement instanceof HTMLElement) {
+1421:        document.activeElement.blur();
+1422:      }
+1423:      try {
+1424:        if (!isListeningRef.current && recognitionRef.current) {
+1425:          recognitionRef.current.continuous = false;
+1426:          recognitionRef.current.start();
+1427:        }
+1428:      } catch (err) {
+1429:        console.error(err);
+1430:      }
+1431:      speechBufferRef.current = "";
+1432:      setInputText("");
+1433:      setIsListening(true);
+1434:      isListeningRef.current = true;
+1435:      setIsAddingNote(true);
+1436:      setIsSearchActive(false);
+1437:    }
+1438:  };
+1439:
+1440:  const micLongPress = useLongPress({
+1441:    onLongPress: () => {
+1442:      if ("vibrate" in navigator) navigator.vibrate(50);
+1443:      toggleVoiceMode();
+1444:    },
+1445:    onClick: handleMicClick,
+1446:    ms: 500,
+1447:  });
+1448:
+1449:  const getDarkerColor = (hsl: string | undefined): string => {
+1450:    if (!hsl) return "#020617"; // slate-950
+1451:    const match = hsl.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
+1452:    if (!match) return "#020617";
+1453:    const h = parseInt(match[1]);
+1454:    const s = parseInt(match[2]);
+1455:    let l = parseInt(match[3]);
+1456:    l = Math.max(0, Math.floor(l / 3)); // 3 times darker
+1457:    return `hsl(${h}, ${s}%, ${l}%)`;
+1458:  };
+1459:
+1460:  const appBgColor = getDarkerColor(currentParent?.colorClass);
+1461:
+1462:  const [isTreeView, setIsTreeView] = useState(false);
+1463:  const effectiveListView = isListView || isTrashView;
+1464:
+1465:  useEffect(() => {
+1466:    setIsTreeView(false);
+1467:  }, [currentParentId]);
+1468:
+1469:  const displayCards = useMemo(() => {
+1470:    let result: (Card & { depth: number })[] = [];
+1471:
+1472:    if (isTrashView) {
+1473:      // Find all deleted cards
+1474:      const deletedCards = cards.filter(c => c.isDeleted);
+1475:      const deletedDict = new Map(deletedCards.map(c => [c.id, c]));
+1476:      
+1477:      // Roots are cards that are deleted, and either have no parent or their parent is NOT deleted
+1478:      const roots = deletedCards.filter(c => !c.parentId || !deletedDict.has(c.parentId)).sort((a, b) => {
+1479:        if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+1480:        if (a.completed !== b.completed) return a.completed ? 1 : -1;
+1481:        return a.order - b.order;
+1482:      });
+1483:
+1484:      const flattenTrash = (children: Card[], depth: number) => {
+1485:        for (const child of children) {
+1486:          result.push({ ...child, depth });
+1487:          const nested = deletedCards.filter(c => c.parentId === child.id).sort((a, b) => {
+1488:            if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+1489:            if (a.completed !== b.completed) return a.completed ? 1 : -1;
+1490:            return a.order - b.order;
+1491:          });
+1492:          flattenTrash(nested, depth + 1);
+1493:        }
+1494:      };
+1495:      
+1496:      flattenTrash(roots, 0);
+1497:
+1498:      if (isSearchActive && searchQuery.trim()) {
+1499:        const query = searchQuery.trim().toLowerCase();
+1500:        result = result.filter(c => c.text.toLowerCase().includes(query));
+1501:      }
+1502:      return result;
+1503:    }
+1504:
+1505:    if (isTreeView && isListView) {
+1506:      // Build a tree flattened view
+1507:      
+1508:      if (isSearchActive && currentParentId && !searchQuery.trim()) {
+1509:        const parentCard = cards.find(c => c.id === currentParentId);
+1510:        if (parentCard) {
+1511:          result.push({ ...parentCard, depth: 0 });
+1512:        }
+1513:      }
+1514:      
+1515:      const flatten = (parentId: string | null, depth: number) => {
+1516:        const children = cards
+1517:          .filter((c) => {
+1518:            if (c.parentId !== parentId) return false;
+1519:            if (c.isDeleted) return false;
+1520:            if (isSearchActive && searchQuery.trim()) {
+1521:              return c.text.toLowerCase().includes(searchQuery.trim().toLowerCase());
+1522:            }
+1523:            if (parentId === null && (c.windowId || "w1") !== activeWindowId) return false;
+1524:            return true;
+1525:          })
+1526:          .sort((a, b) => {
+1527:            if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+1528:            if (a.completed !== b.completed) return a.completed ? 1 : -1;
+1529:            return a.order - b.order;
+1530:          });
+1531:
+1532:        for (const child of children) {
+1533:          result.push({ ...child, depth });
+1534:          flatten(child.id, depth + 1);
+1535:        }
+1536:      };
+1537:
+1538:      flatten(currentParentId, currentParentId ? 1 : 0);
+1539:      return result;
+1540:    }
+1541:
+1542:    // Normal view
+1543:    const filtered = cards
+1544:      .filter((c) => {
+1545:        if (c.isDeleted) return false;
+1546:        if (isSearchActive && searchQuery.trim()) {
+1547:           return c.text.toLowerCase().includes(searchQuery.trim().toLowerCase());
+1548:        }
+1549:        if (isSearchActive && !searchQuery.trim() && currentParentId) {
+1550:           return c.parentId === currentParentId || c.id === currentParentId;
+1551:        }
+1552:        if (currentParentId) return c.parentId === currentParentId;
+1553:        return c.parentId === null && (c.windowId || "w1") === activeWindowId;
+1554:      })
+1555:      .sort((a, b) => {
+1556:        if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+1557:        if (a.completed !== b.completed) return a.completed ? 1 : -1;
+1558:        return a.order - b.order;
+1559:      });
+1560:
+1561:    return filtered.map(c => ({ ...c, depth: currentParentId ? 1 : 0 }));
+1562:  }, [cards, currentParentId, activeWindowId, isSearchActive, searchQuery, isTrashView, isTreeView, isListView]);
+1563:
+1564:  const sensors = useSensors(
+1565:    useSensor(PointerSensor, {
+1566:      activationConstraint: { distance: 5 },
+1567:    }),
+1568:    useSensor(TouchSensor, {
+1569:      activationConstraint: { distance: 5 },
+1570:    }),
+1571:    useSensor(KeyboardSensor),
+1572:  );
+1573:
+1574:  const handleDragStart = (event: DragStartEvent) => {
+1575:    setActiveId(event.active.id as string);
+1576:    setOverId(event.active.id as string);
+1577:    setDragOffset(0);
+1578:  };
+1579:
+1580:  const handleDragMove = (event: DragMoveEvent) => {
+1581:    setDragOffset(event.delta.x);
+1582:    setOverId((event.over?.id as string) || null);
+1583:  };
+1584:
+1585:  const handleDragEnd = (event: DragEndEvent) => {
+1586:    const { active, over } = event;
+1587:
+1588:    if (over && active.id !== over.id) {
+1589:      setCards((prev) => {
+1590:        let subList = prev
+1591:          .filter((c) => {
+1592:            if (currentParentId) return c.parentId === currentParentId;
+1593:            return (
+1594:              c.parentId === null && (c.windowId || "w1") === activeWindowId
+1595:            );
+1596:          })
+1597:          .sort((a, b) => {
+1598:            if (a.completed !== b.completed) return a.completed ? 1 : -1;
+1599:            if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+1600:            return 0;
+1601:          });
+1602:
+1603:        const oldIndex = subList.findIndex((item) => item.id === active.id);
+1604:        const newIndex = subList.findIndex((item) => item.id === over.id);
+1605:        subList = arrayMove(subList, oldIndex, newIndex);
+1606:        subList.sort((a, b) => {
+1607:          if (a.completed !== b.completed) return a.completed ? 1 : -1;
+1608:          if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+1609:          return 0;
+1610:        });
+1611:
+1612:        return [
+1613:          ...prev.filter((c) => {
+1614:            if (currentParentId) return c.parentId !== currentParentId;
+1615:            return !(
+1616:              c.parentId === null && (c.windowId || "w1") === activeWindowId
+1617:            );
+1618:          }),
+1619:          ...subList,
+1620:        ];
+1621:      });
+1622:    }
+1623:
+1624:    setActiveId(null);
+1625:    setOverId(null);
+1626:    setDragOffset(0);
+1627:  };
+1628:
+1629:  const handleDragCancel = () => {
+1630:    setActiveId(null);
+1631:    setOverId(null);
+1632:    setDragOffset(0);
+1633:  };
+1634:
+1635:  const headerColor =
+1636:    currentParent && !currentParent.colorClass?.startsWith("bg-")
+1637:      ? currentParent.colorClass
+1638:      : undefined;
+1639:  const rootCardsOrSiblings = currentParentId
+1640:    ? cards
+1641:        .filter((c) => {
+1642:          if (c.isDeleted) return false;
+1643:          if (c.parentId !== currentParent?.parentId) return false;
+1644:          if (c.completed && c.id !== currentParentId) return false;
+1645:          if (c.parentId === null)
+1646:            return (c.windowId || "w1") === activeWindowId;
+1647:          return true;
+1648:        })
+1649:        .sort((a, b) => {
+1650:          if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+1651:          if (a.completed !== b.completed) return a.completed ? 1 : -1;
+1652:          return a.order - b.order;
+1653:        })
+1654:    : [];
+1655:
+1656:  const swipeStartRef = useRef<{ x: number; y: number; time: number } | null>(
+1657:    null,
+1658:  );
+1659:
+1660:  const handleSwipeStart = (e: React.TouchEvent | React.MouseEvent) => {
+1661:    if ((e.target as HTMLElement).closest(".dnd-draggable")) return; // ignore swipe if starting on drag handle
+1662:    
+1663:    // Dismiss keyboard if scrolling/touching outside the currently editing card
+1664:    if (editingCardId && !(e.target as HTMLElement).closest("[data-editing='true']")) {
+1665:      if (document.activeElement instanceof HTMLElement) {
+1666:        document.activeElement.blur();
+1667:      }
+1668:    }
+1669:    
+1670:    let clientX, clientY;
+1671:    if ("touches" in e) {
+1672:       clientX = e.touches[0].clientX;
+1673:       clientY = e.touches[0].clientY;
+1674:    } else {
+1675:       clientX = (e as any).clientX;
+1676:       clientY = (e as any).clientY;
+1677:    }
+1678:    swipeStartRef.current = {
+1679:      x: clientX,
+1680:      y: clientY,
+1681:      time: Date.now(),
+1682:    };
+1683:  };
+1684:
+1685:  const handleSwipeEnd = (e: React.TouchEvent | React.MouseEvent) => {
+1686:    if (!swipeStartRef.current) return;
+1687:    let clientX, clientY;
+1688:    if ("changedTouches" in e) {
+1689:      clientX = e.changedTouches[0].clientX;
+1690:      clientY = e.changedTouches[0].clientY;
+1691:    } else {
+1692:      clientX = (e as any).clientX;
+1693:      clientY = (e as any).clientY;
+1694:    }
+1695:
+1696:    const dx = clientX - swipeStartRef.current.x;
+1697:    const dy = clientY - swipeStartRef.current.y;
+1698:    const dt = Date.now() - swipeStartRef.current.time;
+1699:    swipeStartRef.current = null;
+1700:
+1701:    if (dt < 500 && Math.abs(dx) > 60 && Math.abs(dy) < 60) {
+1702:      if (currentParentId) {
+1703:        const currentIndex = rootCardsOrSiblings.findIndex(
+1704:          (s) => s.id === currentParentId,
+1705:        );
+1706:        if (currentIndex !== -1) {
+1707:          if (dx < 0 && currentIndex < rootCardsOrSiblings.length - 1) {
+1708:            setCurrentParentId(rootCardsOrSiblings[currentIndex + 1].id);
+1709:          } else if (dx > 0 && currentIndex > 0) {
+1710:            setCurrentParentId(rootCardsOrSiblings[currentIndex - 1].id);
+1711:          }
+1712:        }
+1713:      } else if (windows.length > 1) {
+1714:        const currentIndex = windows.findIndex((w) => w.id === activeWindowId);
+1715:        if (currentIndex !== -1) {
+1716:          if (dx < 0) {
+1717:            // swipe left -> next window
+1718:            const nextIndex = (currentIndex + 1) % windows.length;
+1719:            setActiveWindowId(windows[nextIndex].id);
+1720:          } else if (dx > 0) {
+1721:            // swipe right -> prev window
+1722:            const prevIndex =
+1723:              (currentIndex - 1 + windows.length) % windows.length;
+1724:            setActiveWindowId(windows[prevIndex].id);
+1725:          }
+1726:        }
+1727:      }
+1728:    }
+1729:  };
+1730:
+1731:  return (
+1732:    <div
+1733:      className="flex flex-col fixed inset-0 w-full font-sans text-slate-200 overflow-hidden relative selection:bg-slate-700 transition-colors duration-500"
+1734:      style={{ backgroundColor: appBgColor, height: viewportHeight, top: viewportOffset }}
+1735:    >
+1736:      <AnimatePresence>
+1737:        {clipboardError && (
+1738:          <motion.div
+1739:            initial={{ opacity: 0, y: -20 }}
+1740:            animate={{ opacity: 1, y: 0 }}
+1741:            exit={{ opacity: 0, y: -20 }}
+1742:            className="absolute top-16 left-0 right-0 z-50 flex justify-center pointer-events-none px-4"
+1743:          >
+1744:            <div className="bg-red-500/90 backdrop-blur-sm text-white px-4 py-2 rounded-lg shadow-lg text-sm text-center">
+1745:              {clipboardError}
+1746:            </div>
+1747:          </motion.div>
+1748:        )}
+1749:      </AnimatePresence>
+1750:      
+1751:      <header className={`z-50 shrink-0 flex flex-col w-full absolute top-0 left-0 right-0 transition-all duration-300 ${editingCardId ? "opacity-0 -translate-y-full pointer-events-none" : "opacity-100 translate-y-0"}`}>
+1752:        <div className="flex w-full items-stretch justify-between h-14 bg-slate-950/80 backdrop-blur-md border-b border-slate-800/80">
+1753:          <button
+1754:            {...listViewToggleGestures}
+1755:            className={`w-[18%] shrink-0 flex flex-col items-center justify-center gap-[0.15rem] transition-colors select-none touch-manipulation border-r border-slate-800/80 ${isListView ? "text-teal-400 bg-teal-900/40" : "text-slate-400 hover:bg-slate-900"}`}
+1756:            aria-label="Переключить вид слошным текстом"
+1757:          >
+1758:            <div className="w-5 h-1.5 rounded-sm bg-current opacity-80" />
+1759:            <div className="w-5 h-1.5 rounded-sm bg-current opacity-80" />
+1760:            <div className="w-5 h-1.5 rounded-sm bg-current opacity-80" />
+1761:          </button>
+1762:
+1763:          {isTrashView ? (
+1764:            <div className="flex-1 flex justify-center items-center text-slate-300 font-bold text-[1.35rem]">Корзина</div>
+1765:          ) : currentParentId ? (
+1766:            <div className="flex-1 flex gap-2 no-scrollbar items-center overflow-x-auto snap-x relative before:content-[''] before:min-w-[50vw] before:shrink-0 after:content-[''] after:min-w-[50vw] after:shrink-0 px-2">
+1767:              {cards
+1768:                .filter((c) => {
+1769:                  if (c.isDeleted) return false;
+1770:                  if (c.parentId !== currentParent?.parentId) return false;
+1771:                  if (c.completed && c.id !== currentParentId) return false;
+1772:                  if (c.parentId === null)
+1773:                    return (c.windowId || "w1") === activeWindowId;
+1774:                  return true;
+1775:                })
+1776:                .sort((a, b) => {
+1777:                  if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+1778:                  if (a.completed !== b.completed) return a.completed ? 1 : -1;
+1779:                  return a.order - b.order;
+1780:                })
+1781:                .map((c) => {
+1782:                  const isActive = c.id === currentParentId;
+1783:                  const hasSubCards = cards.some(
+1784:                    (sub) => !sub.isDeleted && sub.parentId === c.id,
+1785:                  );
+1786:                  const hasActiveSubCards = cards.some(
+1787:                    (sub) => !sub.isDeleted && sub.parentId === c.id && !sub.completed,
+1788:                  );
+1789:                  return (
+1790:                    <button
+1791:                      key={c.id}
+1792:                      ref={isActive ? activeTabRef : null}
+1793:                      {...(isActive ? activeTabLongPress : { onClick: () => setCurrentParentId(c.id) })}
+1794:                      onContextMenu={(e) => e.preventDefault()}
+1795:                      className={`shrink-0 px-5 py-2.5 overflow-hidden flex items-center justify-center select-none touch-manipulation font-medium shadow-sm transition-all relative snap-center max-w-[200px] ${!hasSubCards ? "cut-corner-br" : ""} ${
+1796:                        isActive
+1797:                          ? "scale-105 z-10 opacity-100 drop-shadow-md"
+1798:                          : "opacity-60 hover:opacity-100 scale-95 hover:scale-100 brightness-75"
+1799:                      }`}
+1800:                      style={{
+1801:                        backgroundColor: c.colorClass,
+1802:                        color: c.completed ? "#71717a" : "#fff",
+1803:                        WebkitUserSelect: "none",
+1804:                        WebkitTouchCallout: "none"
+1805:                      }}
+1806:                    >
+1807:                      <span className="truncate text-[1.1rem] select-none pointer-events-none">{c.text}</span>
+1808:                      {hasSubCards && (
+1809:                        <div
+1810:                          className="absolute bottom-0 right-0 w-0 h-0 z-10 pointer-events-none transition-colors"
+1811:                          style={{
+1812:                            borderStyle: "solid",
+1813:                            borderWidth: "0 0 14px 14px",
+1814:                            borderColor:
+1815:                              `transparent transparent ${hasActiveSubCards ? "white" : "#a1a1aa"} transparent`,
+1816:                          }}
+1817:                        />
+1818:                      )}
+1819:                    </button>
+1820:                  );
+1821:                })}
+1822:            </div>
+1823:          ) : (
+1824:            <div className="flex-1 flex items-center px-1 gap-1 relative z-50">
+1825:              <button
+1826:                onClick={handleRemoveWindowClick}
+1827:                disabled={activeWindowId === "w1"}
+1828:                className={`w-10 h-10 flex items-center justify-center rounded-lg disabled:opacity-30 disabled:hover:bg-transparent transition-all text-2xl font-medium ${isRemoveWindowArmed ? "bg-red-600 text-white scale-110 shadow-lg shadow-red-500/30" : "text-slate-400 hover:text-red-400 hover:bg-slate-800"}`}
+1829:              >
+1830:                &minus;
+1831:              </button>
+1832:              <div className="relative flex-1 flex justify-center">
+1833:                {isEditingWindow ? (
+1834:                  <input
+1835:                    ref={windowInputRef}
+1836:                    value={editWindowName}
+1837:                    onChange={(e) => setEditWindowName(e.target.value)}
+1838:                    onBlur={saveWindowName}
+1839:                    onKeyDown={(e) => {
+1840:                      if (e.key === "Enter") saveWindowName();
+1841:                    }}
+1842:                    className="bg-zinc-800 text-zinc-100 text-[1.35rem] font-bold tracking-tight text-center rounded-md outline-none px-2 w-[120px]"
+1843:                  />
+1844:                ) : (
+1845:                  <button
+1846:                    {...windowLongPress}
+1847:                    className="text-[1.35rem] font-bold text-slate-200 tracking-tight px-3 py-1 rounded-md hover:bg-slate-800 transition-colors select-none touch-manipulation"
+1848:                  >
+1849:                    {activeWindow?.name || "L1"}
+1850:                  </button>
+1851:                )}
+1852:                {showWindowDropdown && !isEditingWindow && (
+1853:                  <div className="absolute top-full mt-2 bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl shadow-black/50 py-1 min-w-[120px] z-50 overflow-hidden">
+1854:                    {windows.map((w) => (
+1855:                      <button
+1856:                        key={w.id}
+1857:                        onClick={() => {
+1858:                          setActiveWindowId(w.id);
+1859:                          setShowWindowDropdown(false);
+1860:                        }}
+1861:                        className={`w-full text-left px-4 py-2 font-medium ${w.id === activeWindowId ? "text-white bg-zinc-800/80" : "text-zinc-400 hover:bg-zinc-800"}`}
+1862:                      >
+1863:                        {w.name}
+1864:                      </button>
+1865:                    ))}
+1866:                  </div>
+1867:                )}
+1868:              </div>
+1869:              <button
+1870:                onClick={handleAddWindow}
+1871:                className="w-10 h-10 flex items-center justify-center rounded-lg text-slate-400 hover:text-green-400 hover:bg-slate-800 transition-colors text-2xl font-medium"
+1872:              >
+1873:                +
+1874:              </button>
+1875:            </div>
+1876:          )}
+1877:          <div className="w-[18%] shrink-0 flex items-stretch border-l border-slate-800/80">
+1878:            {isSelectingCards ? (
+1879:              <button
+1880:                key="copy"
+1881:                {...copyGestures}
+1882:                className="w-full h-full flex items-center justify-center transition-colors select-none touch-manipulation text-blue-400 hover:bg-slate-800/50 hover:text-blue-300"
+1883:              >
+1884:                <Copy className="w-5 h-5" />
+1885:              </button>
+1886:            ) : (
+1887:              <button
+1888:                key="trash"
+1889:                {...trashGestures}
+1890:                className={`w-full h-full flex items-center justify-center transition-all select-none touch-manipulation ${
+1891:                  isDeletingMode
+1892:                    ? "bg-red-600 text-white shadow-[0_0_15px_rgba(239,68,68,0.4)]"
+1893:                    : isTrashView
+1894:                      ? "text-red-400 bg-red-900/20"
+1895:                      : "text-slate-400 hover:bg-slate-900 hover:text-slate-200"
+1896:                }`}
+1897:              >
+1898:                <Trash2 className="w-5 h-5" />
+1899:              </button>
+1900:            )}
+1901:          </div>
+1902:        </div>
+1903:      </header>
+1904:
+1905:      <main
+1906:        id="main-scroll-container"
+1907:        {...backgroundGestures}
+1908:        onTouchStart={handleSwipeStart}
+1909:        onTouchEnd={handleSwipeEnd}
+1910:        onMouseDown={handleSwipeStart}
+1911:        onMouseUp={handleSwipeEnd}
+1912:        className={`flex-1 overflow-y-auto pt-[3.6rem] px-0.5 flex flex-col w-full h-full transition-[padding] duration-300 ${isSearchActive || isAddingNote ? "pb-[40vh]" : "pb-16"}`}
+1913:      >
+1914:        {currentParent && !isSearchActive && (
+1915:          <div className={`mb-1 shrink-0 relative z-20 shadow-sm transition-opacity duration-300 ${editingCardId && editingCardId !== currentParent.id ? "pointer-events-none opacity-50" : ""}`}>
+1916:            <CardTile
+1917:              card={currentParent}
+1918:              isDragging={false}
+1919:              hasChildren={cards.some((c) => c.parentId === currentParent.id)}
+1920:              hasActiveChildren={cards.some((c) => c.parentId === currentParent.id && !c.completed)}
+1921:              onToggle={() => toggleCardState(currentParent.id)}
+1922:              onEnter={() => {
+1923:                setCurrentParentId(currentParent.id);
+1924:                setIsSearchActive(false);
+1925:                setSearchQuery("");
+1926:              }}
+1927:              onEditStart={stopVoiceRecognition}
+1928:              onEditStateChange={handleEditStateChange}
+1929:              onSelect={(activateSelectionMode?: boolean) => {
+1930:                if (isDeletingMode) {
+1931:                  resetDeletingTimeout();
+1932:                }
+1933:                if (activateSelectionMode && !isSelectingCards) {
+1934:                  setIsSelectingCards(true);
+1935:                  setSelectionStep(0);
+1936:                  setIsDeletingMode(false);
+1937:                  clearDeletingTimeout();
+1938:                }
+1939:                setSelectedCardIds((prev) => {
+1940:                  const s = new Set(prev);
+1941:                  if (s.has(currentParent.id)) s.delete(currentParent.id);
+1942:                  else s.add(currentParent.id);
+1943:                  return s;
+1944:                });
+1945:              }}
+1946:              onUpdate={(updates) => updateCard(currentParent.id, updates)}
+1947:              onDelete={() => deleteCard(currentParent.id)}
+1948:              disabled={isTrashView}
+1949:              disableDrag={true}
+1950:              fontSize={fontSize}
+1951:              lineHeight={lineHeight}
+1952:              fontFamily={FONTS[fontIndex]}
+1953:              isSelected={selectedCardIds.has(currentParent.id)}
+1954:              selectionMode={
+1955:                isSelectingCards ? "move" : isDeletingMode ? "delete" : null
+1956:              }
+1957:              isListView={true}
+1958:              textAlign={textAlign}
+1959:              depth={0}
+1960:            />
+1961:          </div>
+1962:        )}
+1963:
+1964:        <DndContext
+1965:          key={effectiveListView ? "dnd-list-layout" : "dnd-grid-layout"}
+1966:          sensors={sensors}
+1967:          collisionDetection={closestCenter}
+1968:          onDragStart={handleDragStart}
+1969:          onDragEnd={handleDragEnd}
+1970:          onDragCancel={handleDragCancel}
+1971:          autoScroll={{ threshold: { x: 0, y: 0.15 }, acceleration: 7, layoutShiftCompensation: false }}
+1972:        >
+1973:          <div
+1974:            key={effectiveListView ? "list-layout" : "grid-layout"}
+1975:            className={
+1976:              effectiveListView
+1977:                ? "flex flex-col w-full"
+1978:                : "flex flex-wrap gap-1.5 p-1 items-start content-start"
+1979:            }
+1980:          >
+1981:            <SortableContext
+1982:              items={displayCards.map((c) => c.id)}
+1983:              strategy={effectiveListView ? verticalListSortingStrategy : rectSortingStrategy}
+1984:            >
+1985:              {displayCards.map((card) => (
+1986:                <div key={card.id} className={`transition-opacity duration-300 ${editingCardId && editingCardId !== card.id ? "pointer-events-none opacity-50" : ""}`}>
+1987:                  <CardTile
+1988:                    card={card}
+1989:                    depth={card.depth}
+1990:                  isDragging={activeId === card.id}
+1991:                  hasChildren={cards.some((c) => c.parentId === card.id)}
+1992:                  hasActiveChildren={cards.some((c) => c.parentId === card.id && !c.completed)}
+1993:                  onToggle={() => toggleCardState(card.id)}
+1994:                  onEnter={() => {
+1995:                    setCurrentParentId(card.id);
+1996:                    setIsSearchActive(false);
+1997:                    setSearchQuery("");
+1998:                  }}
+1999:                  onEditStart={stopVoiceRecognition}
+2000:                  onEditStateChange={handleEditStateChange}
+2001:                  onSelect={(activateSelectionMode?: boolean) => {
+2002:                    if (isDeletingMode) {
+2003:                      resetDeletingTimeout();
+2004:                    }
+2005:                    if (activateSelectionMode && !isSelectingCards) {
+2006:                      setIsSelectingCards(true);
+2007:                      setSelectionStep(0);
+2008:                      setIsDeletingMode(false);
+2009:                      clearDeletingTimeout();
+2010:                    }
+2011:                    setSelectedCardIds((prev) => {
+2012:                      const s = new Set(prev);
+2013:                      if (s.has(card.id)) s.delete(card.id);
+2014:                      else s.add(card.id);
+2015:                      return s;
+2016:                    });
+2017:                  }}
+2018:                  onUpdate={(updates) => updateCard(card.id, updates)}
+2019:                  onDelete={() => deleteCard(card.id)}
+2020:                  disabled={isTrashView}
+2021:                  disableDrag={isTreeView}
+2022:                  fontSize={fontSize}
+2023:                  lineHeight={lineHeight}
+2024:                  fontFamily={FONTS[fontIndex]}
+2025:                  isSelected={selectedCardIds.has(card.id)}
+2026:                  selectionMode={
+2027:                    isSelectingCards ? "move" : isDeletingMode ? "delete" : null
+2028:                  }
+2029:                  isListView={effectiveListView}
+2030:                  textAlign={textAlign}
+2031:                />
+2032:                </div>
+2033:              ))}
+2034:            </SortableContext>
+2035:          </div>
+2036:        </DndContext>
+2037:      </main>
+2038:
+2039:      <div className={`absolute bottom-0 w-full ${editingCardId ? "z-[250]" : "z-20"} pointer-events-none flex flex-col justify-end`}>
+2040:        <AnimatePresence>
+2041:          {isSearchActive && (
+2042:            <motion.div
+2043:              initial={{ y: "100%", opacity: 0 }}
+2044:              animate={{ y: 0, opacity: 1 }}
+2045:              exit={{ y: "100%", opacity: 0 }}
+2046:              transition={{ type: "spring", bounce: 0, duration: 0.3 }}
+2047:              className={`w-full bg-slate-900 h-14 px-2 border-t border-slate-800/80 items-center shadow-lg transform-gpu ${editingCardId ? "hidden" : "flex pointer-events-auto"}`}
+2048:            >
+2049:              <Search className="w-5 h-5 text-slate-400 ml-2 shrink-0" />
+2050:              <input
+2051:                type="text"
+2052:                placeholder="Поиск..."
+2053:                value={searchQuery}
+2054:                onChange={(e) => setSearchQuery(e.target.value)}
+2055:                onFocus={() => setIsSearchFocused(true)}
+2056:                onBlur={() => setIsSearchFocused(false)}
+2057:                autoFocus={!(voiceContext === "search" && isListening)}
+2058:                className="w-full h-full min-w-0 bg-transparent outline-none pl-3 pr-2 text-slate-200 text-lg"
+2059:              />
+2060:              <button className="h-full px-2 text-slate-400 hover:text-slate-200" onClick={() => { setIsSearchActive(false); setSearchQuery(""); }}>
+2061:                <Minus className="w-5 h-5" />
+2062:              </button>
+2063:            </motion.div>
+2064:          )}
+2065:
+2066:          {isAddingNote && (
+2067:            <motion.div
+2068:              initial={{ y: "100%", opacity: 0 }}
+2069:              animate={{ y: 0, opacity: 1 }}
+2070:              exit={{ y: "100%", opacity: 0 }}
+2071:              transition={{ type: "spring", bounce: 0, duration: 0.3 }}
+2072:              className={`w-full bg-slate-900 px-2 min-h-14 border-t border-slate-800/80 items-end shadow-lg transform-gpu ${editingCardId ? "hidden" : "flex pointer-events-auto"}`}
+2073:            >
+2074:              <textarea
+2075:                ref={textAreaRef}
+2076:                value={inputText}
+2077:                onChange={(e) => setInputText(e.target.value)}
+2078:                onFocus={stopVoiceRecognition}
+2079:                onPointerDown={stopVoiceRecognition}
+2080:                placeholder="Новая запись..."
+2081:                autoFocus={!(voiceContext === "note" && isListening)}
+2082:                className="w-full min-w-0 bg-transparent outline-none pl-2 pr-2 py-[15px] leading-tight text-slate-200 text-[1.15rem] resize-none overflow-y-auto"
+2083:                style={{
+2084:                  height: "55px",
+2085:                  maxHeight: "75vh"
+2086:                }}
+2087:                onInput={(e) => {
+2088:                  e.currentTarget.style.height = "55px";
+2089:                  e.currentTarget.style.height = Math.max(55, e.currentTarget.scrollHeight) + "px";
+2090:                }}
+2091:              />
+2092:              <button
+2093:                type="button"
+2094:                onClick={(e) => {
+2095:                   handleManualAdd(e);
+2096:                   setIsAddingNote(false);
+2097:                }}
+2098:                className="shrink-0 p-1 mb-2.5 text-blue-500 hover:text-blue-400 active:scale-95 transition-all self-end"
+2099:              >
+2100:                <Plus className="w-7 h-7" />
+2101:              </button>
+2102:            </motion.div>
+2103:          )}
+2104:        </AnimatePresence>
+2105:
+2106:        <div className={`flex items-stretch shrink-0 ${editingCardId ? "bg-transparent border-transparent pointer-events-none" : "bg-slate-950 border-t border-slate-800/80 pointer-events-auto"} h-[60px]`}>
+2107:          <div className="flex items-stretch w-full h-full">
+2108:            {editingCardId ? (
+2109:              <>
+2110:                <button
+2111:                  type="button"
+2112:                  key="check"
+2113:                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("save-active-card")); }}
+2114:                  className="w-[18%] shrink-0 flex items-center justify-center transition-all text-green-400 bg-green-900/20 shadow-[0_0_15px_rgba(74,222,128,0.2)] hover:bg-green-800/30 animate-pulse pointer-events-auto drop-shadow-md select-none touch-none border-t border-r border-slate-800/80 rounded-tr-xl"
+2115:                >
+2116:                  <Check className="w-8 h-8" />
+2117:                </button>
+2118:                <div className="flex-1 shrink-0 bg-transparent border-transparent" />
+2119:                <button
+2120:                  type="button"
+2121:                  key="undo"
+2122:                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("undo-active-card")); }}
+2123:                  className={`w-[18%] shrink-0 flex items-center justify-center transition-colors pointer-events-auto drop-shadow-md border-t border-l border-r border-slate-800/80 rounded-tl-xl select-none touch-none ${activeCardHistory.canUndo ? "text-slate-300 hover:text-white bg-slate-900/80" : "text-slate-600 bg-slate-950/50 pointer-events-none"}`}
+2124:                >
+2125:                  <Undo2 className="w-6 h-6" />
+2126:                </button>
+2127:                <button
+2128:                  type="button"
+2129:                  key="redo"
+2130:                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("redo-active-card")); }}
+2131:                  className={`w-[18%] shrink-0 flex items-center justify-center transition-colors border-t border-slate-800/80 pointer-events-auto drop-shadow-md select-none touch-none ${activeCardHistory.canRedo ? "text-slate-300 hover:text-white bg-slate-900/80" : "text-slate-600 bg-slate-950/50 pointer-events-none"}`}
+2132:                >
+2133:                  <Redo2 className="w-7 h-7" />
+2134:                </button>
+2135:              </>
+2136:            ) : (
+2137:              <>
+2138:                <div className="relative w-[18%] shrink-0 flex items-stretch">
+2139:                  <AnimatePresence>
+2140:                    {showTextModeMenu && (
+2141:                      <motion.div
+2142:                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+2143:                        animate={{ opacity: 1, y: 0, scale: 1 }}
+2144:                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+2145:                        transition={{ duration: 0.15 }}
+2146:                        className="absolute bottom-[110%] w-full flex flex-col gap-2 z-50 pointer-events-auto"
+2147:                      >
+2148:                        <div
+2149:                          data-text-mode="family"
+2150:                          className={`w-full aspect-square flex flex-col items-center justify-center rounded-2xl shadow-xl transition-colors border ${hoveredTextMode === 'family' ? 'bg-indigo-900/60 text-indigo-200 border-indigo-500/30' : 'bg-slate-900 border-slate-700 text-slate-300'}`}
+2151:                        >
+2152:                           <Type className="w-[1.35rem] h-[1.35rem] mb-1" />
+2153:                           <span className="text-[0.6rem] font-medium leading-none">Шрифт</span>
+2154:                        </div>
+2155:                        <div
+2156:                          data-text-mode="lineHeight"
+2157:                          className={`w-full aspect-square flex flex-col items-center justify-center rounded-2xl shadow-xl transition-colors border ${hoveredTextMode === 'lineHeight' ? 'bg-teal-900/60 text-teal-200 border-teal-500/30' : 'bg-slate-900 border-slate-700 text-slate-300'}`}
+2158:                        >
+2159:                           <Baseline className="w-[1.35rem] h-[1.35rem] mb-1" />
+2160:                           <span className="text-[0.6rem] font-medium leading-none">Интервал</span>
+2161:                        </div>
+2162:                        <div
+2163:                          data-text-mode="size"
+2164:                          className={`w-full aspect-square flex flex-col items-center justify-center rounded-2xl shadow-xl transition-colors border ${hoveredTextMode === 'size' ? 'bg-slate-800 text-slate-200 border-slate-500/30' : 'bg-slate-900 border-slate-700 text-slate-300'}`}
+2165:                        >
+2166:                           <AArrowUp className="w-[1.35rem] h-[1.35rem] mb-1" />
+2167:                           <span className="text-[0.6rem] font-medium leading-none">Размер</span>
+2168:                        </div>
+2169:                      </motion.div>
+2170:                    )}
+2171:                  </AnimatePresence>
+2172:                  
+2173:                  <button
+2174:                    type="button"
+2175:                    onPointerDown={handleTextModePointerDown}
+2176:                    onPointerMove={handleTextModePointerMove}
+2177:                    onPointerUp={handleTextModePointerUp}
+2178:                    onPointerCancel={handleTextModePointerUp}
+2179:                    onContextMenu={(e) => e.preventDefault()}
+2180:                    className={`w-full shrink-0 flex items-center justify-center transition-colors select-none touch-none ${
+2181:                        textMode === "size"
+2182:                        ? "text-slate-200 bg-slate-800"
+2183:                        : textMode === "lineHeight"
+2184:                          ? "text-teal-200 bg-teal-900/60"
+2185:                          : textMode === "family"
+2186:                            ? "text-indigo-200 bg-indigo-900/60"
+2187:                            : currentParentId || isTrashView || (isSearchActive && searchQuery.length > 0)
+2188:                              ? "text-slate-200"
+2189:                              : "text-slate-600"
+2190:                    } hover:text-slate-300`}
+2191:                    aria-label="Назад или Уменьшить текст"
+2192:                  >
+2193:                    {textMode !== "none" ? (
+2194:                      <Minus className="w-6 h-6" />
+2195:                    ) : (
+2196:                      <ChevronLeft className="w-6 h-6" />
+2197:                    )}
+2198:                  </button>
+2199:                </div>
+2200:                <div className="w-[18%] shrink-0 relative flex items-stretch border-l border-slate-800/80">
+2201:                  <AnimatePresence initial={false}>
+2202:                    {textMode === "none" ? (
+2203:                      <motion.button
+2204:                        key="search-btn"
+2205:                        type="button"
+2206:                        {...searchBtnLongPress}
+2207:                        initial={{ opacity: 0 }}
+2208:                        animate={{ opacity: 1 }}
+2209:                        exit={{ opacity: 0 }}
+2210:                        transition={{ duration: 0.15 }}
+2211:                        className={`absolute inset-0 flex items-center justify-center transition-colors ${isSearchActive ? 'text-teal-400 bg-teal-900/20' : 'text-slate-400 hover:bg-slate-900'}`}
+2212:                      >
+2213:                         <Search className="w-5 h-5" />
+2214:                         {isSearchActive && voiceContext === "search" && isListening && (
+2215:                           <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+2216:                         )}
+2217:                      </motion.button>
+2218:                    ) : (
+2219:                      <motion.button
+2220:                        key="plus-btn"
+2221:                        type="button"
+2222:                        onClick={() => {
+2223:                          if (textMode === "size") {
+2224:                            setFontSize((f) => Math.min(3, +(f + 0.01).toFixed(3)));
+2225:                            resetFontTimeout();
+2226:                          } else if (textMode === "lineHeight") {
+2227:                            setLineHeight((l) => Math.min(3, +(l + 0.05).toFixed(2)));
+2228:                            resetFontTimeout();
+2229:                          } else if (textMode === "family") {
+2230:                            setFontIndex((i) => (i + 1) % FONTS.length);
+2231:                            resetFontTimeout();
+2232:                          }
+2233:                        }}
+2234:                        initial={{ opacity: 0 }}
+2235:                        animate={{ opacity: 1 }}
+2236:                        exit={{ opacity: 0 }}
+2237:                        transition={{ duration: 0.15 }}
+2238:                        className={`absolute inset-0 flex items-center justify-center transition-colors ${
+2239:                          textMode === "size"
+2240:                            ? "text-slate-200 bg-slate-800 hover:text-white"
+2241:                            : textMode === "lineHeight"
+2242:                              ? "text-teal-200 bg-teal-900/60 hover:text-teal-100"
+2243:                              : "text-indigo-200 bg-indigo-900/60 hover:text-indigo-100"
+2244:                        }`}
+2245:                      >
+2246:                         <Plus className="w-6 h-6" />
+2247:                      </motion.button>
+2248:                    )}
+2249:                  </AnimatePresence>
+2250:                </div>
+2251:                
+2252:                <button
+2253:                   type="button"
+2254:                   {...noteBtnLongPress}
+2255:                   onContextMenu={(e) => e.preventDefault()}
+2256:                   disabled={isTrashView && !hasCardsToInsert}
+2257:                   className={`flex-1 shrink-0 flex items-center justify-center font-medium select-none touch-manipulation border-l border-r border-slate-800/80 transition-colors ${isAddingNote ? 'text-blue-400 bg-blue-900/20' : 'text-slate-300 hover:bg-slate-900 text-[1.05rem]'} ${(isTrashView && !hasCardsToInsert) ? 'opacity-30 pointer-events-none' : ''}`}
+2258:                   style={{ WebkitUserSelect: "none", userSelect: "none" }}
+2259:                >
+2260:                   {hasCardsToInsert ? (isTrashView ? "Восстановить" : "Вставить") : hasCardsToPinToggle ? (areAllSelectedPinned ? "Открепить" : "Закрепить") : "Заметка"}
+2261:                </button>
+2262:
+2263:                <div className="relative w-[18%] shrink-0 flex items-stretch">
+2264:                  <AnimatePresence>
+2265:                    {showSelectMenu && (
+2266:                      <motion.div
+2267:                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+2268:                        animate={{ opacity: 1, y: 0, scale: 1 }}
+2269:                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+2270:                        transition={{ duration: 0.15 }}
+2271:                        className="absolute bottom-[110%] w-full flex flex-col gap-2 z-50 pointer-events-auto"
+2272:                      >
+2273:                        <div
+2274:                          data-select-mode="all"
+2275:                          className={`w-full aspect-square flex flex-col items-center justify-center rounded-2xl shadow-xl transition-colors border ${hoveredSelectMode === 'all' ? 'bg-blue-900/60 text-blue-200 border-blue-500/30' : 'bg-slate-900 border-slate-700 text-slate-300'}`}
+2276:                        >
+2277:                           <CheckSquare className="w-[1.35rem] h-[1.35rem] mb-1" />
+2278:                           <span className="text-[0.6rem] font-medium leading-none">Все</span>
+2279:                        </div>
+2280:                        <div
+2281:                          data-select-mode="completed"
+2282:                          className={`w-full aspect-square flex flex-col items-center justify-center rounded-2xl shadow-xl transition-colors border ${hoveredSelectMode === 'completed' ? 'bg-blue-900/60 text-blue-200 border-blue-500/30' : 'bg-slate-900 border-slate-700 text-slate-300'}`}
+2283:                        >
+2284:                           <Check className="w-[1.35rem] h-[1.35rem] mb-1" />
+2285:                           <span className="text-[0.6rem] font-medium leading-none">Заверш.</span>
+2286:                        </div>
+2287:                        <div
+2288:                          data-select-mode="active"
+2289:                          className={`w-full aspect-square flex flex-col items-center justify-center rounded-2xl shadow-xl transition-colors border ${hoveredSelectMode === 'active' ? 'bg-blue-900/60 text-blue-200 border-blue-500/30' : 'bg-slate-900 border-slate-700 text-slate-300'}`}
+2290:                        >
+2291:                           <Square className="w-[1.35rem] h-[1.35rem] mb-1" />
+2292:                           <span className="text-[0.6rem] font-medium leading-none">Акт.</span>
+2293:                        </div>
+2294:                      </motion.div>
+2295:                    )}
+2296:                  </AnimatePresence>
+2297:
+2298:                  <button
+2299:                    type="button"
+2300:                    onPointerDown={handleSelectPointerDown}
+2301:                    onPointerMove={handleSelectPointerMove}
+2302:                    onPointerUp={handleSelectPointerUp}
+2303:                    onPointerCancel={handleSelectPointerUp}
+2304:                    onContextMenu={(e) => e.preventDefault()}
+2305:                    className={`w-full shrink-0 transition-all flex items-center justify-center select-none touch-none ${isSelectingCards ? "text-white bg-blue-600 shadow-[0_0_15px_rgba(37,99,235,0.4)]" : "text-slate-400 hover:bg-slate-900"}`}
+2306:                  >
+2307:                    <CheckSquare className="w-[1.2rem] h-[1.2rem]" />
+2308:                  </button>
+2309:                </div>
+2310:
+2311:                <div className="relative w-[18%] shrink-0 flex items-stretch">
+2312:                  <AnimatePresence>
+2313:                    {showMicMenu && (
+2314:                      <motion.div
+2315:                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+2316:                        animate={{ opacity: 1, y: 0, scale: 1 }}
+2317:                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+2318:                        transition={{ duration: 0.15 }}
+2319:                        className="absolute bottom-[110%] w-full flex flex-col gap-2 z-50 pointer-events-auto"
+2320:                      >
+2321:                        <div
+2322:                          data-mic-mode="continuous"
+2323:                          className={`w-full aspect-square flex items-center justify-center rounded-2xl shadow-xl transition-colors border ${hoveredMicOption === 'continuous' ? 'bg-rose-500/20 text-rose-400 border-rose-500/30' : 'bg-slate-900 border-slate-700 text-slate-300'}`}
+2324:                        >
+2325:                           <Infinity className="w-[1.35rem] h-[1.35rem]" />
+2326:                        </div>
+2327:                        <div
+2328:                          data-mic-mode="multiple"
+2329:                          className={`w-full aspect-square flex items-center justify-center rounded-2xl shadow-xl transition-colors border ${hoveredMicOption === 'multiple' ? 'bg-rose-500/20 text-rose-400 border-rose-500/30' : 'bg-slate-900 border-slate-700 text-slate-300'}`}
+2330:                        >
+2331:                           <Layers className="w-[1.35rem] h-[1.35rem]" />
+2332:                        </div>
+2333:                        <div
+2334:                          data-mic-mode="single"
+2335:                          className={`w-full aspect-square flex items-center justify-center rounded-2xl shadow-xl transition-colors border ${hoveredMicOption === 'single' ? 'bg-rose-500/20 text-rose-400 border-rose-500/30' : 'bg-slate-900 border-slate-700 text-slate-300'}`}
+2336:                        >
+2337:                           <Mic className="w-[1.35rem] h-[1.35rem]" />
+2338:                        </div>
+2339:                      </motion.div>
+2340:                    )}
+2341:                  </AnimatePresence>
+2342:                  
+2343:                  <button
+2344:                    onPointerDown={handleMicPointerDown}
+2345:                    onPointerMove={handleMicPointerMove}
+2346:                    onPointerUp={handleMicPointerUp}
+2347:                    onPointerCancel={handleMicPointerUp}
+2348:                    onContextMenu={(e) => e.preventDefault()}
+2349:                    disabled={isTrashView}
+2350:                    className={`flex-1 shrink-0 flex items-center justify-center transition-all ${
+2351:                      isListening && voiceContext === "note"
+2352:                        ? "bg-rose-500/15 text-rose-500"
+2353:                        : "text-slate-400 hover:text-slate-200 hover:bg-slate-900 border-l border-slate-800/80"
+2354:                    } select-none touch-none ${isTrashView ? 'opacity-30 pointer-events-none' : ''}`}
+2355:                    aria-label="Голосовой ввод"
+2356:                  >
+2357:                    {voiceMode === "continuous" ? (
+2358:                      <div className={`relative ${isListening ? "scale-110 animate-pulse" : ""}`}>
+2359:                        <Mic className="w-[1.35rem] h-[1.35rem]" />
+2360:                        <Infinity className="w-[14px] h-[14px] absolute -bottom-1 -right-1" />
+2361:                      </div>
+2362:                    ) : voiceMode === "multiple" ? (
+2363:                      <div className={`relative ${isListening ? "scale-110 animate-pulse" : ""}`}>
+2364:                        <Mic className="w-[1.35rem] h-[1.35rem]" />
+2365:                        <Layers className="w-3 h-3 absolute -bottom-1 -right-1" />
+2366:                      </div>
+2367:                    ) : (
+2368:                      <Mic className={`w-[1.35rem] h-[1.35rem] ${isListening ? "scale-110 animate-pulse" : ""}`} />
+2369:                    )}
+2370:                  </button>
+2371:                </div>
+2372:              </>
+2373:            )}
+2374:          </div>
+2375:        </div>
+2376:      </div>
+2377:    </div>
+2378:  );
+2379:}
+2380:
+2381:// Утилита для отдельной плитки (с поддержкой Dnd-kit)
+2382:const CardTile: React.FC<{
+2383:  card: Card;
+2384:  onToggle: () => void;
+2385:  onEnter: () => void;
+2386:  onSelect?: (activate?: boolean) => void;
+2387:  onUpdate: (u: Partial<Card>) => void;
+2388:  onDelete: () => void;
+2389:  isDragging: boolean;
+2390:  disabled: boolean;
+2391:  disableDrag?: boolean;
+2392:  hasChildren: boolean;
+2393:  hasActiveChildren?: boolean;
+2394:  fontSize: number;
+2395:  lineHeight: number;
+2396:  fontFamily: string;
+2397:  isSelected?: boolean;
+2398:  selectionMode?: "move" | "delete" | "unselected" | null;
+2399:  isListView?: boolean;
+2400:  textAlign?: "center" | "left";
+2401:  depth?: number;
+2402:  onEditStart?: () => void;
+2403:  onEditStateChange?: (id: string, isEditing: boolean) => void;
+2404:}> = ({
+2405:  card,
+2406:  onToggle,
+2407:  onEnter,
+2408:  onSelect,
+2409:  onUpdate,
+2410:  onDelete,
+2411:  isDragging,
+2412:  disabled,
+2413:  disableDrag,
+2414:  hasChildren,
+2415:  hasActiveChildren,
+2416:  fontSize,
+2417:  lineHeight,
+2418:  fontFamily,
+2419:  isSelected,
+2420:  selectionMode,
+2421:  isListView,
+2422:  textAlign = "center",
+2423:  depth = 0,
+2424:  onEditStart,
+2425:  onEditStateChange,
+2426:}) => {
+2427:  const [isEditing, setIsEditing] = useState(false);
+2428:  const [history, setHistory] = useState<string[]>([]);
+2429:  const [historyIndex, setHistoryIndex] = useState(0);
+2430:  const spanRef = useRef<HTMLSpanElement>(null);
+2431:  const cardRef = useRef<HTMLDivElement>(null);
+2432:  const measureRef = useRef<HTMLSpanElement>(null);
+2433:  const hiddenContainerRef = useRef<HTMLDivElement>(null);
+2434:
+2435:  const { attributes, listeners, setNodeRef, transform, transition } =
+2436:    useSortable({ id: card.id, disabled: disabled || disableDrag || isEditing });
+2437:
+2438:  const setRefs = useCallback(
+2439:    (node: HTMLDivElement | null) => {
+2440:      setNodeRef(node);
+2441:      cardRef.current = node;
+2442:    },
+2443:    [setNodeRef],
+2444:  );
+2445:
+2446:  const applyTypographyAndWidth = useCallback(() => {
+2447:    // Width logic
+2448:    const cardEl = cardRef.current;
+2449:    if (cardEl) {
+2450:      const width = cardEl.getBoundingClientRect().width;
+2451:      const vw = window.innerWidth;
+2452:      if (width >= vw * 0.91) {
+2453:        cardEl.classList.add("is-full-width");
+2454:      } else {
+2455:        cardEl.classList.remove("is-full-width");
+2456:      }
+2457:    }
+2458:
+2459:    // Typography logic
+2460:    const measureEl = measureRef.current;
+2461:    if (!measureEl || !spanRef.current) return;
+2462:
+2463:    const style = window.getComputedStyle(measureEl);
+2464:    let lh = parseFloat(style.lineHeight);
+2465:    if (isNaN(lh) || lh === 0) {
+2466:      const basePx =
+2467:        parseFloat(
+2468:          window.getComputedStyle(document.documentElement).fontSize,
+2469:        ) || 16;
+2470:      lh = fontSize * basePx * 1.25;
+2471:    }
+2472:
+2473:    const height = measureEl.offsetHeight;
+2474:    let lines = Math.floor(height / lh + 0.1);
+2475:    lines = Math.max(1, lines);
+2476:
+2477:    const reductionPercent = (lines - 1) * 0.01;
+2478:    const finalScale = Math.max(0.5, 1 - reductionPercent);
+2479:    const adjustedFontSize = isListView ? fontSize : fontSize * finalScale;
+2480:
+2481:    // Only update if changed to avoid unnecessary renders
+2482:    if (spanRef.current.style.fontSize !== `${adjustedFontSize}rem`) {
+2483:      spanRef.current.style.fontSize = `${adjustedFontSize}rem`;
+2484:    }
+2485:  }, [fontSize, isListView]);
+2486:
+2487:  // Apply synchronously before first browser paint
+2488:  useLayoutEffect(() => {
+2489:    applyTypographyAndWidth();
+2490:  }, [applyTypographyAndWidth, card.text]); // re-run immediately if remote text changes
+2491:
+2492:  useEffect(() => {
+2493:    const cardEl = cardRef.current;
+2494:    const measureEl = measureRef.current;
+2495:    if (!cardEl || !measureEl) return;
+2496:
+2497:    let rafId: number;
+2498:    // Fallback resize observer for external dimensional changes
+2499:    // Wrap with requestAnimationFrame to prevent "ResizeObserver loop limit exceeded" errors.
+2500:    const obs = new ResizeObserver(() => {
+2501:      if (rafId) cancelAnimationFrame(rafId);
+2502:      rafId = window.requestAnimationFrame(() => {
+2503:        applyTypographyAndWidth();
+2504:      });
+2505:    });
+2506:
+2507:    obs.observe(cardEl);
+2508:    obs.observe(measureEl);
+2509:    return () => {
+2510:      obs.disconnect();
+2511:      if (rafId) cancelAnimationFrame(rafId);
+2512:    };
+2513:  }, [applyTypographyAndWidth]);
+2514:
+2515:  const updateSize = useCallback((text: string) => {
+2516:    const newMaxWidth = Math.max(
+2517:      120,
+2518:      18 * fontSize * Math.sqrt(text.length || 1),
+2519:    );
+2520:
+2521:    if (hiddenContainerRef.current)
+2522:      hiddenContainerRef.current.style.maxWidth = isListView ? (depth > 0 ? `calc(100% - ${depth * 14}px)` : "100%") : `min(${newMaxWidth}px, 92vw)`;
+2523:    if (cardRef.current)
+2524:      cardRef.current.style.maxWidth = isListView ? (depth > 0 ? `calc(100% - ${depth * 14}px)` : "100%") : `min(${newMaxWidth}px, 92vw)`;
+2525:
+2526:    if (measureRef.current) {
+2527:      measureRef.current.textContent = text + "\u200B";
+2528:    }
+2529:  }, [fontSize, isListView, depth]);
+2530:
+2531:  const handleInput = (e: React.FormEvent<HTMLSpanElement>) => {
+2532:    const text = e.currentTarget.textContent || "";
+2533:    if (history.length > 0 && text !== history[historyIndex]) {
+2534:      const newHistory = history.slice(0, historyIndex + 1);
+2535:      newHistory.push(text);
+2536:      setHistory(newHistory);
+2537:      setHistoryIndex(newHistory.length - 1);
+2538:    }
+2539:    updateSize(text);
+2540:  };
+2541:
+2542:  const undo = (e: React.MouseEvent) => {
+2543:    e.preventDefault();
+2544:    e.stopPropagation();
+2545:    if (historyIndex > 0 && spanRef.current) {
+2546:      const newIndex = historyIndex - 1;
+2547:      const prev = history[newIndex];
+2548:      setHistoryIndex(newIndex);
+2549:      spanRef.current.textContent = prev;
+2550:      spanRef.current.focus();
+2551:      updateSize(prev);
+2552:    }
+2553:  };
+2554:
+2555:  const redo = (e: React.MouseEvent) => {
+2556:    e.preventDefault();
+2557:    e.stopPropagation();
+2558:    if (historyIndex < history.length - 1 && spanRef.current) {
+2559:      const newIndex = historyIndex + 1;
+2560:      const next = history[newIndex];
+2561:      setHistoryIndex(newIndex);
+2562:      spanRef.current.textContent = next;
+2563:      spanRef.current.focus();
+2564:      updateSize(next);
+2565:    }
+2566:  };
+2567:
+2568:  useEffect(() => {
+2569:    if (isEditing) {
+2570:      document.dispatchEvent(new CustomEvent("active-card-history-state", {
+2571:        detail: {
+2572:          canUndo: historyIndex > 0,
+2573:          canRedo: historyIndex < history.length - 1
+2574:        }
+2575:      }));
+2576:    }
+2577:  }, [historyIndex, history.length, isEditing]);
+2578:
+2579:  const isOldTailwindBg = card.colorClass?.startsWith("bg-");
+2580:  const customBg =
+2581:    !isOldTailwindBg && !card.completed && !isSelected
+2582:      ? card.colorClass
+2583:      : undefined;
+2584:
+2585:  // Умный расчет ширины: стараемся держать пропорцию Ширина > Высота (около 1.3 - 1.5).
+2586:  // Коэффициент 18 создает идеальный баланс ширины, чтобы карточки были прямоугольными
+2587:  // и не растягивались на весь экран сразу
+2588:  const idealMaxWidth = Math.max(
+2589:    120,
+2590:    18 * fontSize * Math.sqrt(card.text.length || 1),
+2591:  );
+2592:
+2593:  const style: React.CSSProperties = {
+2594:    transform: CSS.Translate.toString(transform),
+2595:    transition,
+2596:    zIndex: isEditing ? 200 : isDragging ? 10 : 1,
+2597:    scale: isDragging ? 1.05 : 1,
+2598:    opacity: isDragging ? 0.8 : 1,
+2599:    backgroundColor: customBg,
+2600:    width: isListView ? (depth > 0 ? `calc(100% - ${depth * 14}px)` : "100%") : "auto",
+2601:    minWidth: isListView ? "auto" : "min-content",
+2602:    maxWidth: isListView ? (depth > 0 ? `calc(100% - ${depth * 14}px)` : "100%") : `min(${idealMaxWidth}px, 92vw)`,
+2603:    marginLeft: isListView && depth > 0 ? `${depth * 14}px` : undefined,
+2604:    pointerEvents: isEditing ? "auto" : undefined,
+2605:  };
+2606:
+2607:  const enterEditMode = () => {
+2608:    if (disabled || card.completed || isEditing) return;
+2609:    setIsEditing(true);
+2610:    onEditStateChange?.(card.id, true);
+2611:    setHistory([card.text]);
+2612:    setHistoryIndex(0);
+2613:    onEditStart?.();
+2614:    // setTimeout ensures the element is ready before we try to focus
+2615:    setTimeout(() => {
+2616:      if (spanRef.current) {
+2617:        const el = spanRef.current;
+2618:        el.focus();
+2619:        if (
+2620:          typeof window.getSelection !== "undefined" &&
+2621:          typeof document.createRange !== "undefined"
+2622:        ) {
+2623:          const range = document.createRange();
+2624:          range.selectNodeContents(el);
+2625:          range.collapse(false); // Move to end
+2626:          const sel = window.getSelection();
+2627:          sel?.removeAllRanges();
+2628:          sel?.addRange(range);
+2629:        }
+2630:      }
+2631:    }, 50);
+2632:  };
+2633:
+2634:  const cardLongPress = useLongPress({
+2635:    onClick: () => {
+2636:      if (!isEditing && !isDragging && !disabled) onEnter();
+2637:    },
+2638:    onDoubleClick: () => {
+2639:      if (!isEditing && !isDragging && !disabled) enterEditMode(); // Double short click -> edit text
+2640:    },
+2641:    onLongPress: () => {
+2642:      if (!isEditing && !isDragging) {
+2643:        if ("vibrate" in navigator) navigator.vibrate(50);
+2644:        if (onSelect) onSelect(true);
+2645:      }
+2646:    },
+2647:    ms: 400,
+2648:    vibrate: false,
+2649:  });
+2650:
+2651:  const handleSave = useCallback(() => {
+2652:    if (!spanRef.current) return;
+2653:    const finalVal = spanRef.current.textContent || "";
+2654:    if (!finalVal.trim()) {
+2655:      onDelete(); // Удаляем если стерли весь текст
+2656:      setIsEditing(false);
+2657:      onEditStateChange?.(card.id, false);
+2658:      return;
+2659:    }
+2660:    // Only update if it actually changed
+2661:    if (finalVal.trim() !== card.text) {
+2662:      onUpdate({ text: finalVal.trim() });
+2663:    }
+2664:    setIsEditing(false);
+2665:    onEditStateChange?.(card.id, false);
+2666:  }, [card.text, onDelete, onUpdate, card.id, onEditStateChange]);
+2667:
+2668:  const handleBlur = useCallback((e: React.FocusEvent) => {
+2669:    // В режиме редактирования клик снаружи не должен сохранять карточку, по просьбе пользователя
+2670:  }, []);
+2671:
+2672:  useEffect(() => {
+2673:    if (!isEditing) return;
+2674:    
+2675:    const onGlobalSave = () => handleSave();
+2676:    const onGlobalUndo = (e: Event) => undo(e as any);
+2677:    const onGlobalRedo = (e: Event) => redo(e as any);
+2678:    
+2679:    document.addEventListener("save-active-card", onGlobalSave);
+2680:    document.addEventListener("undo-active-card", onGlobalUndo);
+2681:    document.addEventListener("redo-active-card", onGlobalRedo);
+2682:    
+2683:    return () => {
+2684:      document.removeEventListener("save-active-card", onGlobalSave);
+2685:      document.removeEventListener("undo-active-card", onGlobalUndo);
+2686:      document.removeEventListener("redo-active-card", onGlobalRedo);
+2687:    };
+2688:  }, [isEditing, handleSave, undo, redo]);
+2689:
+2690:  // Обычный показ карточки или инлайн редактирование
+2691:  return (
+2692:    <>
+2693:      <div
+2694:        ref={hiddenContainerRef}
+2695:        aria-hidden="true"
+2696:        className="fixed top-[-9999px] left-[-9999px] opacity-0 pointer-events-none flex flex-col justify-center px-4 py-2.5 cut-corner-br border border-transparent"
+2697:        style={{
+2698:          width: isListView ? (depth > 0 ? `calc(100% - ${depth * 14}px)` : "100%") : "max-content",
+2699:          minWidth: isListView ? "auto" : "min-content",
+2700:          maxWidth: isListView ? (depth > 0 ? `calc(100% - ${depth * 14}px)` : "100%") : `min(${idealMaxWidth}px, 92vw)`,
+2701:        }}
+2702:      >
+2703:        <div
+2704:          className={`flex-1 flex max-w-full items-center ${textAlign === "center" ? "justify-center text-center" : "justify-start text-left"}`}
+2705:        >
+2706:          <span
+2707:            ref={measureRef}
+2708:            className="block whitespace-pre-wrap font-medium"
+2709:            style={{
+2710:              fontSize: `${fontSize}rem`,
+2711:              lineHeight: lineHeight,
+2712:              fontFamily: `'${fontFamily}', sans-serif`,
+2713:              overflowWrap: "break-word",
+2714:            }}
+2715:          >
+2716:            {card.text + "\u200B"}
+2717:          </span>
+2718:        </div>
+2719:      </div>
+2720:
+2721:      <div
+2722:        ref={setRefs}
+2723:        style={style}
+2724:        data-editing={isEditing ? 'true' : undefined}
+2725:        {...(isEditing ? {} : cardLongPress)}
+2726:        className={`
+2727:         group
+2728:         relative overflow-hidden ${isEditing ? "cursor-text z-20 shadow-md ring-1 ring-zinc-500/50" : "cursor-pointer hover:brightness-110"}
+2729:         ${isEditing ? "select-auto touch-auto" : "select-none touch-pan-y"} transition-colors transition-opacity duration-200
+2730:         flex flex-col justify-center h-fit
+2731:         ${isListView ? `w-full px-6 py-4 border-b border-zinc-950/20 ${!hasChildren ? "cut-corner-br" : ""}` : `w-fit px-4 py-2.5 border border-zinc-950/50 ${!hasChildren ? "cut-corner-br" : ""}`}
+2732:         ${
+2733:           isSelected && selectionMode === "move"
+2734:             ? "!bg-white !text-black !border-zinc-400 shadow-[0_0_15px_rgba(255,255,255,0.5)] z-10"
+2735:             : isSelected && selectionMode === "delete"
+2736:               ? "!bg-red-600 !text-white !border-white shadow-[0_0_15px_rgba(239,68,68,0.8)] z-10"
+2737:               : card.completed && !isEditing
+2738:                 ? `bg-zinc-900 opacity-60 grayscale !border-zinc-500 ${selectionMode != null && !isSelected ? "brightness-50" : ""}`
+2739:                 : `${isOldTailwindBg ? card.colorClass : ""} ${selectionMode != null && !isSelected ? "opacity-60 brightness-75 grayscale-[0.5]" : ""}`
+2740:         }
+2741:       `}
+2742:      >
+2743:        {card.isPinned && (
+2744:          <div className="absolute top-1.5 left-1.5 w-1.5 h-1.5 bg-white rounded-full z-10 shadow-sm" />
+2745:        )}
+2746:        {(selectionMode || !disabled) && !isEditing && (
+2747:          <div
+2748:            {...(selectionMode ? {} : attributes)}
+2749:            {...(selectionMode ? {} : listeners)}
+2750:            className={`absolute left-0 top-0 bottom-0 w-[25%] z-20 ${selectionMode ? "cursor-pointer" : "cursor-grab active:cursor-grabbing dnd-draggable"}`}
+2751:            style={{ touchAction: "none" }}
+2752:            onClick={(e) => {
+2753:              e.stopPropagation();
+2754:              e.preventDefault();
+2755:              if (selectionMode) {
+2756:                if (onSelect) onSelect(false);
+2757:              } else {
+2758:                onToggle();
+2759:              }
+2760:            }}
+2761:          />
+2762:        )}
+2763:        <div
+2764:          className={`flex-1 flex max-w-full items-center ${textAlign === "center" ? "justify-center text-center" : "justify-start text-left"}`}
+2765:        >
+2766:          <span
+2767:            ref={spanRef}
+2768:            contentEditable={isEditing}
+2769:            suppressContentEditableWarning={true}
+2770:            onBlur={handleBlur}
+2771:            onInput={handleInput}
+2772:            onKeyDown={(e) => {
+2773:              if (e.key === "Enter") {
+2774:                // allow Enter to work normally inside content editable without exiting
+2775:                e.stopPropagation();
+2776:              }
+2777:            }}
+2778:            className={`block whitespace-pre-wrap ${isEditing ? "transition-all duration-300" : "transition-colors duration-200"} font-medium group-[.is-full-width]:!font-normal outline-none ${card.completed && !isEditing ? "text-zinc-300" : isSelected && selectionMode === "move" ? "!text-black" : "text-zinc-100"} ${isEditing ? "caret-white" : ""}`}
+2779:            style={{
+2780:              fontSize: `${fontSize}rem`,
+2781:              lineHeight: lineHeight,
+2782:              fontFamily: `'${fontFamily}', sans-serif`,
+2783:              overflowWrap: "break-word",
+2784:              minWidth: isEditing ? "2ch" : undefined,
+2785:            }}
+2786:          >
+2787:            {card.text}
+2788:          </span>
+2789:        </div>
+2790:
+2791:        {hasChildren && !isEditing && (
+2792:          <div
+2793:            className="absolute bottom-0 right-0 w-0 h-0 z-10 pointer-events-none transition-colors"
+2794:            style={{
+2795:              borderStyle: "solid",
+2796:              borderWidth: "0 0 14px 14px",
+2797:              borderColor: `transparent transparent ${isSelected ? "#ef4444" : (!hasActiveChildren ? "#d4d4d8" : "white")} transparent`,
+2798:            }}
+2799:          />
+2800:        )}
+2801:
+2802:        {/* Галочка завершения */}
+2803:        <AnimatePresence>
+2804:          {card.completed && !isEditing && (
+2805:            <motion.div
+2806:              initial={{ scale: 0 }}
+2807:              animate={{ scale: 1 }}
+2808:              exit={{ scale: 0 }}
+2809:              className="absolute bottom-1 right-1 text-zinc-400 bg-zinc-900 rounded-full p-0.5 border border-zinc-700 shadow-sm"
+2810:            >
+2811:              <Check className="w-3.5 h-3.5" />
+2812:            </motion.div>
+2813:          )}
+2814:        </AnimatePresence>
+2815:      </div>
+2816:    </>
+2817:  );
+2818:};

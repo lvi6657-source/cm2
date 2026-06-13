@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Remix2: Карта Памяти</string>
+    <string name="title_activity_main">Remix2: Карта Памяти</string>
+    <string name="package_name">com.remix2.cardmemory</string>
+    <string name="custom_url_scheme">com.remix2.cardmemory</string>
+</resources>

@@ -1,0 +1,8 @@
+{
+	"appId": "com.remix2.cardmemory",
+	"appName": "Remix2: Карта Памяти",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https"
+	}
+}

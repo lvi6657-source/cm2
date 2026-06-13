@@ -1,0 +1,10 @@
+{
+  "name": "Remix2: Карта Памяти",
+  "description": "Приложение для заметок в виде плиток с голосовым вводом и двумя режимами диктовки.",
+  "requestFramePermissions": [
+    "microphone",
+    "clipboard-read",
+    "clipboard-write"
+  ],
+  "majorCapabilities": []
+}

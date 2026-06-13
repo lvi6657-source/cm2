@@ -1,0 +1,31 @@
+export const getRandomColor = () => {
+  const h = Math.floor(Math.random() * 360);
+  const s = Math.floor(Math.random() * 60) + 30;
+  const l = Math.floor(Math.random() * 20) + 15;
+  return `hsl(${h}, ${s}%, ${l}%)`;
+};
+
+export const darkenHsl = (hslStr: string, percentage: number) => {
+  if (!hslStr.startsWith("hsl")) return hslStr;
+  const match = hslStr.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
+  if (!match) return hslStr;
+  const h = parseInt(match[1]);
+  const s = parseInt(match[2]);
+  const l = Math.max(0, parseInt(match[3]) - percentage);
+  return `hsl(${h}, ${s}%, ${l}%)`;
+};
+
+export const getDependentIds = (rootIds: string[], allCards: any[]) => {
+  const ids = new Set(rootIds);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const c of allCards) {
+      if (c.parentId && ids.has(c.parentId) && !ids.has(c.id)) {
+        ids.add(c.id);
+        added = true;
+      }
+    }
+  }
+  return ids;
+};
